@@ -311,8 +311,98 @@ def open_capture(capture_path: str) -> dict:
     return bridge.call("open_capture", {"capture_path": capture_path})
 
 
+def _ensure_extension_installed():
+    """Auto-download and install RenderDoc extension on first run.
+
+    Downloads the extension from GitHub if not already installed.
+    No need to bundle extension files in the wheel package.
+    """
+    import os
+    import shutil
+    import sys
+    import tempfile
+    import zipfile
+    from io import BytesIO
+    from pathlib import Path
+    from urllib.request import urlopen
+    from urllib.error import URLError
+
+    GITHUB_ZIP_URL = "https://github.com/halby24/RenderDocMCP/archive/refs/heads/main.zip"
+    EXTENSION_SUBDIR = "RenderDocMCP-main/renderdoc_extension"
+
+    # Determine target directory
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return
+        ext_dir = Path(appdata) / "qrenderdoc" / "extensions"
+    else:
+        ext_dir = Path.home() / ".local" / "share" / "qrenderdoc" / "extensions"
+
+    dest = ext_dir / "renderdoc_mcp_bridge"
+
+    # Already installed — skip
+    if dest.exists() and (dest / "extension.json").exists():
+        return
+
+    print("[RenderDoc MCP] Extension not found, downloading from GitHub...", file=sys.stderr)
+
+    try:
+        # Download zip from GitHub
+        resp = urlopen(GITHUB_ZIP_URL, timeout=30)
+        zip_data = BytesIO(resp.read())
+
+        # Extract only the extension directory
+        with zipfile.ZipFile(zip_data) as zf:
+            # Find all files under renderdoc_extension/
+            ext_files = [
+                f for f in zf.namelist()
+                if f.startswith(EXTENSION_SUBDIR + "/") and not f.endswith("/")
+            ]
+
+            if not ext_files:
+                print("[RenderDoc MCP] Warning: extension files not found in GitHub repo", file=sys.stderr)
+                return
+
+            # Extract to temp dir first, then move
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_ext = Path(tmpdir) / "renderdoc_mcp_bridge"
+                tmp_ext.mkdir()
+
+                for filepath in ext_files:
+                    # Strip the prefix to get relative path
+                    rel_path = filepath[len(EXTENSION_SUBDIR) + 1:]
+                    if not rel_path:
+                        continue
+                    target = tmp_ext / rel_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(filepath) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+
+                # Move to final destination
+                ext_dir.mkdir(parents=True, exist_ok=True)
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(tmp_ext, dest)
+
+        print(
+            f"[RenderDoc MCP] ✅ Extension installed to {dest}\n"
+            f"[RenderDoc MCP] 👉 Please enable it in RenderDoc: Tools > Manage Extensions > RenderDoc MCP Bridge",
+            file=sys.stderr,
+        )
+
+    except (URLError, OSError, zipfile.BadZipFile) as e:
+        print(
+            f"[RenderDoc MCP] ⚠️ Auto-install failed: {e}\n"
+            f"[RenderDoc MCP] Please manually run: python scripts/install_extension.py\n"
+            f"[RenderDoc MCP] See: https://github.com/halby24/RenderDocMCP",
+            file=sys.stderr,
+        )
+
+
 def main():
     """Run the MCP server"""
+    _ensure_extension_installed()
     mcp.run()
 
 
