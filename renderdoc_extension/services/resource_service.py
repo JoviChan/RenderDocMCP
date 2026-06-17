@@ -3,6 +3,7 @@ Resource information service for RenderDoc.
 """
 
 import base64
+import struct
 
 import renderdoc as rd
 
@@ -26,22 +27,97 @@ class ResourceService:
                 return tex
         return None
 
+    def _resource_name(self, resource_id):
+        try:
+            name = self.ctx.GetResourceName(resource_id)
+            return name or ""
+        except Exception:
+            return ""
+
+    # =================================================================
+    # Catalog: list textures / buffers
+    # =================================================================
+
+    def list_textures(self, name_filter=None):
+        """List every texture in the capture (with optional substring filter)."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"textures": []}
+
+        def callback(controller):
+            items = []
+            for tex in controller.GetTextures():
+                name = self._resource_name(tex.resourceId)
+                if name_filter and name_filter.lower() not in (name or "").lower():
+                    continue
+                items.append({
+                    "resource_id": str(tex.resourceId),
+                    "name": name,
+                    "width": tex.width,
+                    "height": tex.height,
+                    "depth": tex.depth,
+                    "array_size": tex.arraysize,
+                    "mip_levels": tex.mips,
+                    "format": str(tex.format.Name()),
+                    "dimension": str(tex.type),
+                    "msaa_samples": tex.msSamp,
+                    "byte_size": tex.byteSize,
+                })
+            result["textures"] = items
+
+        self._invoke(callback)
+        return result
+
+    def list_buffers(self, name_filter=None):
+        """List every buffer in the capture (with optional substring filter)."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"buffers": []}
+
+        def callback(controller):
+            items = []
+            for buf in controller.GetBuffers():
+                name = self._resource_name(buf.resourceId)
+                if name_filter and name_filter.lower() not in (name or "").lower():
+                    continue
+                item = {
+                    "resource_id": str(buf.resourceId),
+                    "name": name,
+                    "length": buf.length,
+                }
+                # 'creationFlags' / 'usage' may not exist on all backends
+                for attr in ("creationFlags", "type"):
+                    if hasattr(buf, attr):
+                        try:
+                            item[attr] = str(getattr(buf, attr))
+                        except Exception:
+                            pass
+                items.append(item)
+            result["buffers"] = items
+
+        self._invoke(callback)
+        return result
+
+    # =================================================================
+    # Buffer contents
+    # =================================================================
+
     def get_buffer_contents(self, resource_id, offset=0, length=0):
-        """Get buffer data"""
+        """Get raw buffer data as base64."""
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
         result = {"data": None, "error": None}
 
         def callback(controller):
-            # Parse resource ID
             try:
                 rid = Parsers.parse_resource_id(resource_id)
             except Exception:
                 result["error"] = "Invalid resource ID: %s" % resource_id
                 return
 
-            # Find buffer
             buf_desc = None
             for buf in controller.GetBuffers():
                 if buf.resourceId == rid:
@@ -52,7 +128,6 @@ class ResourceService:
                 result["error"] = "Buffer not found: %s" % resource_id
                 return
 
-            # Get data
             actual_length = length if length > 0 else buf_desc.length
             data = controller.GetBufferData(rid, offset, actual_length)
 
@@ -69,6 +144,96 @@ class ResourceService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["data"]
+
+    # Typed buffer reader: parses a buffer as a flat array of a single type.
+    _TYPED_FORMATS = {
+        "float32": ("f", 4), "float": ("f", 4),
+        "float16": ("e", 2), "half": ("e", 2),
+        "int32": ("i", 4), "int": ("i", 4),
+        "uint32": ("I", 4), "uint": ("I", 4),
+        "int16": ("h", 2), "short": ("h", 2),
+        "uint16": ("H", 2), "ushort": ("H", 2),
+        "int8": ("b", 1), "byte": ("b", 1),
+        "uint8": ("B", 1), "ubyte": ("B", 1),
+        "int64": ("q", 8),
+        "uint64": ("Q", 8),
+        "float64": ("d", 8), "double": ("d", 8),
+    }
+
+    def read_buffer_typed(self, resource_id, offset=0, count=64,
+                           data_type="float32", components=4):
+        """Parse a buffer as a flat array of N-component vectors.
+
+        Args:
+            resource_id: Buffer ResourceId.
+            offset: Byte offset to start reading from.
+            count: Number of vectors (groups of `components` scalars) to return.
+            data_type: One of float32/float16/int32/uint32/int16/uint16/...
+            components: 1..4 — vector size.
+
+        Returns:
+            ``{values: [[x,y,z,w], ...], type, components, count, offset, total_size}``
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        if data_type not in self._TYPED_FORMATS:
+            raise ValueError("Unsupported data_type: %s" % data_type)
+        if components < 1 or components > 4:
+            raise ValueError("components must be 1..4")
+
+        fmt_char, elem_size = self._TYPED_FORMATS[data_type]
+        bytes_per_vec = elem_size * components
+        total_bytes = bytes_per_vec * count
+
+        result = {"data": None, "error": None}
+
+        def callback(controller):
+            try:
+                rid = Parsers.parse_resource_id(resource_id)
+            except Exception:
+                result["error"] = "Invalid resource ID: %s" % resource_id
+                return
+
+            buf_desc = None
+            for buf in controller.GetBuffers():
+                if buf.resourceId == rid:
+                    buf_desc = buf
+                    break
+            if not buf_desc:
+                result["error"] = "Buffer not found: %s" % resource_id
+                return
+
+            available = max(0, buf_desc.length - offset)
+            read_bytes = min(total_bytes, available)
+            data = bytes(controller.GetBufferData(rid, offset, read_bytes))
+
+            n_vecs = len(data) // bytes_per_vec
+            full_fmt = "<" + (fmt_char * components) * n_vecs
+            unpacked = struct.unpack(full_fmt, data[:bytes_per_vec * n_vecs]) if n_vecs else ()
+
+            values = []
+            for i in range(n_vecs):
+                vec = list(unpacked[i * components:(i + 1) * components])
+                values.append(vec[0] if components == 1 else vec)
+
+            result["data"] = {
+                "resource_id": resource_id,
+                "type": data_type,
+                "components": components,
+                "count": n_vecs,
+                "offset": offset,
+                "total_size": buf_desc.length,
+                "values": values,
+            }
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]
+
+    # =================================================================
+    # Texture
+    # =================================================================
 
     def get_texture_info(self, resource_id):
         """Get texture metadata"""
@@ -87,6 +252,7 @@ class ResourceService:
 
                 result["texture"] = {
                     "resource_id": resource_id,
+                    "name": self._resource_name(tex_desc.resourceId),
                     "width": tex_desc.width,
                     "height": tex_desc.height,
                     "depth": tex_desc.depth,

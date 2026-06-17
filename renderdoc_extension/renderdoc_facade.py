@@ -118,6 +118,13 @@ class RenderDocFacade:
         """Get buffer data"""
         return self._resource.get_buffer_contents(resource_id, offset, length)
 
+    def read_buffer_typed(self, resource_id, offset=0, count=64,
+                           data_type="float32", components=4):
+        """Parse a buffer as a typed flat array (float32/uint16/...)."""
+        return self._resource.read_buffer_typed(
+            resource_id, offset, count, data_type, components
+        )
+
     def get_texture_info(self, resource_id):
         """Get texture metadata"""
         return self._resource.get_texture_info(resource_id)
@@ -126,12 +133,52 @@ class RenderDocFacade:
         """Get texture pixel data"""
         return self._resource.get_texture_data(resource_id, mip, slice, sample, depth_slice)
 
+    def list_textures(self, name_filter=None):
+        """List every texture in the capture."""
+        return self._resource.list_textures(name_filter)
+
+    def list_buffers(self, name_filter=None):
+        """List every buffer in the capture."""
+        return self._resource.list_buffers(name_filter)
+
     # ==================== Pipeline Operations ====================
 
     def get_shader_info(self, event_id, stage):
         """Get shader information for a specific stage"""
         return self._pipeline.get_shader_info(event_id, stage)
 
-    def get_pipeline_state(self, event_id):
+    def get_pipeline_state(self, event_id, include_cbuffer_values=True):
         """Get full pipeline state at an event"""
-        return self._pipeline.get_pipeline_state(event_id)
+        return self._pipeline.get_pipeline_state(event_id, include_cbuffer_values)
+
+    def get_cbuffer_values(self, event_id, stage="pixel", cbuffer_slot=None,
+                           expand_depth=2, member_offset=0, member_limit=-1):
+        """Read constant-buffer / uniform-buffer values for a draw call."""
+        return self._pipeline.get_cbuffer_values(
+            event_id, stage, cbuffer_slot, expand_depth, member_offset, member_limit
+        )
+
+    def expand_cbuffer_member(self, event_id, cbuffer_slot, member_path,
+                              stage="pixel", expand_depth=2, member_limit=-1):
+        """Drill into a deep cbuffer member by dotted/index path."""
+        return self._pipeline.expand_cbuffer_member(
+            event_id, cbuffer_slot, member_path, stage, expand_depth, member_limit
+        )
+
+    def get_shader_resources(self, event_id, stage):
+        """One-shot dump of every binding for a given shader stage."""
+        return self._pipeline.get_shader_resources(event_id, stage)
+
+    # ==================== Action Extras ====================
+
+    def get_dispatches(self, event_id_min=None, event_id_max=None, marker_filter=None):
+        """List Compute Dispatches in the capture."""
+        return self._action.get_dispatches(event_id_min, event_id_max, marker_filter)
+
+    def get_pass_drawcalls(self, event_id):
+        """Get all draw calls within the same render pass as ``event_id``."""
+        return self._action.get_pass_drawcalls(event_id)
+
+    def detect_engine(self):
+        """Heuristic engine detection from marker patterns."""
+        return self._action.detect_engine()

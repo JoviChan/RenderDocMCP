@@ -313,3 +313,184 @@ class ActionService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["data"]
+
+    def get_dispatches(self, event_id_min=None, event_id_max=None,
+                       marker_filter=None):
+        """List every Compute Dispatch in the capture (optionally filtered)."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"dispatches": []}
+
+        def callback(controller):
+            structured = controller.GetStructuredFile()
+            entries = []
+
+            def visit(actions, marker_path):
+                for a in actions:
+                    name = a.GetName(structured)
+                    flags = a.flags
+
+                    is_push = flags & rd.ActionFlags.PushMarker
+                    if is_push:
+                        marker_path = marker_path + [name]
+
+                    if flags & rd.ActionFlags.Dispatch:
+                        ev = a.eventId
+                        if event_id_min is not None and ev < event_id_min:
+                            pass
+                        elif event_id_max is not None and ev > event_id_max:
+                            pass
+                        elif marker_filter and not any(
+                            marker_filter.lower() in m.lower() for m in marker_path
+                        ):
+                            pass
+                        else:
+                            entries.append({
+                                "event_id": ev,
+                                "name": name,
+                                "dispatch_threads_x": a.dispatchDimension[0]
+                                    if hasattr(a, "dispatchDimension") else None,
+                                "dispatch_threads_y": a.dispatchDimension[1]
+                                    if hasattr(a, "dispatchDimension") else None,
+                                "dispatch_threads_z": a.dispatchDimension[2]
+                                    if hasattr(a, "dispatchDimension") else None,
+                                "marker_path": list(marker_path),
+                            })
+
+                    if a.children:
+                        visit(a.children, marker_path)
+
+                    if is_push:
+                        marker_path = marker_path[:-1]
+
+            visit(controller.GetRootActions(), [])
+            result["dispatches"] = entries
+            result["count"] = len(entries)
+
+        self._invoke(callback)
+        return result
+
+    def get_pass_drawcalls(self, event_id):
+        """Get every draw within the same render pass as ``event_id``.
+
+        A "pass" is delimited by BeginPass/EndPass flags. The closest
+        enclosing PushMarker chain is treated as the pass when no explicit
+        pass boundary exists.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"pass": None, "draws": []}
+
+        def callback(controller):
+            structured = controller.GetStructuredFile()
+
+            # Walk to find the nearest PushMarker that contains event_id.
+            ancestor = None
+
+            def find(actions, parent):
+                nonlocal ancestor
+                for a in actions:
+                    is_push = a.flags & rd.ActionFlags.PushMarker
+                    candidate = a if is_push else parent
+                    if a.eventId == event_id:
+                        ancestor = candidate
+                        return True
+                    if a.children:
+                        if find(a.children, candidate):
+                            return True
+                return False
+
+            find(controller.GetRootActions(), None)
+            if ancestor is None:
+                result["error"] = "No enclosing pass found for event %d" % event_id
+                return
+
+            # Collect draws under that ancestor (or all children if no ancestor).
+            draws = []
+            def collect(actions):
+                for a in actions:
+                    if a.flags & rd.ActionFlags.Drawcall:
+                        draws.append({
+                            "event_id": a.eventId,
+                            "name": a.GetName(structured),
+                            "num_indices": a.numIndices,
+                            "num_instances": a.numInstances,
+                        })
+                    if a.children:
+                        collect(a.children)
+
+            collect(ancestor.children)
+            result["pass"] = {
+                "name": ancestor.GetName(structured),
+                "event_id": ancestor.eventId,
+            }
+            result["draws"] = draws
+            result["count"] = len(draws)
+
+        self._invoke(callback)
+        if "error" in result:
+            raise ValueError(result["error"])
+        return result
+
+    def detect_engine(self):
+        """Heuristic engine detection from marker names and resource patterns."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"engine": "unknown", "confidence": 0.0, "markers_seen": []}
+
+        # Common signatures (substring, lowercased) -> engine name.
+        signatures = [
+            ("camera.render", "Unity"),
+            ("uir.drawchain", "Unity"),
+            ("ugui.rendering", "Unity"),
+            ("renderforward.renderloopjob", "Unity"),
+            ("playerendofframe", "Unity"),
+            ("editorloop", "Unity"),
+            ("scenecaptureviews", "Unreal"),
+            ("rdg::", "Unreal"),
+            ("basepass", "Unreal"),
+            ("translucency", "Unreal"),
+            ("postprocessing", "Unreal"),
+            ("lumen", "Unreal"),
+            ("nanite", "Unreal"),
+            ("neox", "NeoX"),
+            ("aurora", "NeoX"),
+            ("mobile_branch", "NeoX"),
+        ]
+
+        scores = {}
+        seen_markers = []
+
+        def callback(controller):
+            structured = controller.GetStructuredFile()
+            roots = controller.GetRootActions()
+
+            def visit(actions, depth=0):
+                for a in actions:
+                    if a.flags & (rd.ActionFlags.PushMarker | rd.ActionFlags.SetMarker):
+                        name = a.GetName(structured) or ""
+                        if depth < 3 and len(seen_markers) < 30:
+                            seen_markers.append(name)
+                        low = name.lower()
+                        for sig, eng in signatures:
+                            if sig in low:
+                                scores[eng] = scores.get(eng, 0) + 1
+                    if a.children:
+                        visit(a.children, depth + 1)
+
+            visit(roots)
+
+        self._invoke(callback)
+
+        if scores:
+            best = max(scores.items(), key=lambda kv: kv[1])
+            total = sum(scores.values())
+            result["engine"] = best[0]
+            result["confidence"] = best[1] / total
+            result["scores"] = scores
+        result["markers_seen"] = seen_markers
+        return result
+

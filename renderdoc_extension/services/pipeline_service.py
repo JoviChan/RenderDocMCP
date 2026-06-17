@@ -1,10 +1,14 @@
 """
 Pipeline state service for RenderDoc.
+
+Covers shader info, full pipeline state dump, comprehensive shader resource
+binding listing, and constant-buffer / uniform-buffer value extraction across
+D3D11, D3D12, Vulkan and OpenGL/GLES.
 """
 
 import renderdoc as rd
 
-from ..utils import Parsers, Serializers, Helpers
+from ..utils import Parsers, Serializers, Helpers, sanitize_sentinel
 
 
 class PipelineService:
@@ -14,8 +18,12 @@ class PipelineService:
         self.ctx = ctx
         self._invoke = invoke_fn
 
+    # =================================================================
+    # Public API
+    # =================================================================
+
     def get_shader_info(self, event_id, stage):
-        """Get shader information for a specific stage"""
+        """Get shader information for a specific stage including cbuffer values."""
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
@@ -41,21 +49,21 @@ class PipelineService:
                 "stage": stage,
             }
 
-            # Get disassembly
+            # Disassembly
             try:
                 targets = controller.GetDisassemblyTargets(True)
                 if targets:
-                    disasm = controller.DisassembleShader(
-                        pipe.GetGraphicsPipelineObject(), reflection, targets[0]
-                    )
+                    pipe_obj = Helpers.get_pipeline_object(pipe)
+                    disasm = controller.DisassembleShader(pipe_obj, reflection, targets[0])
                     shader_info["disassembly"] = disasm
+                    shader_info["disassembly_target"] = str(targets[0])
             except Exception as e:
                 shader_info["disassembly_error"] = str(e)
 
-            # Get constant buffer info
-            if reflection:
+            if Helpers.is_reflection_valid(reflection):
                 shader_info["constant_buffers"] = self._get_cbuffer_info(
-                    controller, pipe, reflection, stage_enum
+                    controller, pipe, reflection, stage_enum, shader,
+                    expand_depth=2, member_limit=-1,
                 )
                 shader_info["resources"] = self._get_resource_bindings(reflection)
 
@@ -67,8 +75,12 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["shader"]
 
-    def get_pipeline_state(self, event_id):
-        """Get full pipeline state at an event"""
+    def get_pipeline_state(self, event_id, include_cbuffer_values=True):
+        """Get full pipeline state at an event.
+
+        When include_cbuffer_values is True (default), every stage's
+        constant buffers carry resolved variable values, not just declarations.
+        """
         if not self.ctx.IsCaptureLoaded():
             raise ValueError("No capture loaded")
 
@@ -85,57 +97,48 @@ class PipelineService:
                 "api": str(api),
             }
 
-            # Shader stages with detailed bindings
             stages = {}
-            stage_list = Helpers.get_all_shader_stages()
-            for stage in stage_list:
+            for stage in Helpers.get_all_shader_stages():
                 shader = pipe.GetShader(stage)
-                if shader != rd.ResourceId.Null():
-                    stage_info = {
-                        "resource_id": str(shader),
-                        "entry_point": pipe.GetShaderEntryPoint(stage),
-                    }
+                if shader == rd.ResourceId.Null():
+                    continue
 
-                    reflection = pipe.GetShaderReflection(stage)
+                stage_info = {
+                    "resource_id": str(shader),
+                    "entry_point": pipe.GetShaderEntryPoint(stage),
+                }
+                reflection = pipe.GetShaderReflection(stage)
 
-                    stage_info["resources"] = self._get_stage_resources(
-                        controller, pipe, stage, reflection
-                    )
-                    stage_info["uavs"] = self._get_stage_uavs(
-                        controller, pipe, stage, reflection
-                    )
-                    stage_info["samplers"] = self._get_stage_samplers(
-                        pipe, stage, reflection
-                    )
-                    stage_info["constant_buffers"] = self._get_stage_cbuffers(
-                        controller, pipe, stage, reflection
-                    )
+                stage_info["resources"] = self._get_stage_resources(controller, pipe, stage, reflection)
+                stage_info["uavs"] = self._get_stage_uavs(controller, pipe, stage, reflection)
+                stage_info["samplers"] = self._get_stage_samplers(pipe, stage, reflection)
 
-                    stages[str(stage)] = stage_info
+                if include_cbuffer_values and Helpers.is_reflection_valid(reflection):
+                    stage_info["constant_buffers"] = self._get_cbuffer_info(
+                        controller, pipe, reflection, stage, shader,
+                        expand_depth=1, member_limit=-1,
+                    )
+                else:
+                    stage_info["constant_buffers"] = self._get_stage_cbuffers_meta(reflection)
+
+                stages[str(stage)] = stage_info
 
             pipeline_info["shaders"] = stages
 
-            # Viewport and scissor
             try:
                 vp_scissor = pipe.GetViewportScissor()
                 if vp_scissor:
                     viewports = []
                     for v in vp_scissor.viewports:
-                        viewports.append(
-                            {
-                                "x": v.x,
-                                "y": v.y,
-                                "width": v.width,
-                                "height": v.height,
-                                "min_depth": v.minDepth,
-                                "max_depth": v.maxDepth,
-                            }
-                        )
+                        viewports.append({
+                            "x": v.x, "y": v.y,
+                            "width": v.width, "height": v.height,
+                            "min_depth": v.minDepth, "max_depth": v.maxDepth,
+                        })
                     pipeline_info["viewports"] = viewports
             except Exception:
                 pass
 
-            # Render targets
             try:
                 om = pipe.GetOutputMerger()
                 if om:
@@ -144,13 +147,11 @@ class PipelineService:
                         if rt.resourceId != rd.ResourceId.Null():
                             rts.append({"index": i, "resource_id": str(rt.resourceId)})
                     pipeline_info["render_targets"] = rts
-
                     if om.depthTarget.resourceId != rd.ResourceId.Null():
                         pipeline_info["depth_target"] = str(om.depthTarget.resourceId)
             except Exception:
                 pass
 
-            # Input assembly
             try:
                 ia = pipe.GetIAState()
                 if ia:
@@ -165,6 +166,196 @@ class PipelineService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["pipeline"]
+
+    def get_cbuffer_values(self, event_id, stage="pixel", cbuffer_slot=None,
+                           expand_depth=2, member_offset=0, member_limit=-1):
+        """Read constant-buffer / uniform-buffer values for a draw call.
+
+        Args:
+            event_id: Draw call event ID.
+            stage: Shader stage (vertex/pixel/compute/...). Default 'pixel'.
+            cbuffer_slot: Optional bind slot filter (b0/b3/...). None = all.
+            expand_depth: Recursion depth for nested members.
+            member_offset: Member-level pagination offset (top-level vars).
+            member_limit: Max members per level, -1 = unlimited.
+
+        Works on D3D11/D3D12, Vulkan, OpenGL, OpenGL ES (mobile).
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {
+            "success": False,
+            "event_id": event_id,
+            "stage": stage,
+            "shader_id": None,
+            "constant_buffers": [],
+            "member_offset": member_offset,
+            "member_limit": member_limit,
+        }
+
+        def callback(controller):
+            try:
+                controller.SetFrameEvent(event_id, True)
+                stage_enum = Helpers.parse_stage_string(stage)
+
+                api_type = controller.GetAPIProperties().pipelineType
+                try:
+                    result["api"] = api_type.name
+                except Exception:
+                    result["api"] = str(api_type)
+
+                pipe = controller.GetPipelineState()
+                shader = pipe.GetShader(stage_enum)
+                reflection = pipe.GetShaderReflection(stage_enum)
+
+                if not Helpers.is_reflection_valid(reflection):
+                    result["error"] = "No reflection for %s shader" % stage
+                    return
+
+                result["shader_id"] = str(shader)
+
+                cbs = self._get_cbuffer_info(
+                    controller, pipe, reflection, stage_enum, shader,
+                    expand_depth=expand_depth,
+                    member_limit=member_limit,
+                    cbuffer_slot=cbuffer_slot,
+                    member_offset=member_offset,
+                )
+                result["constant_buffers"] = cbs
+                result["success"] = True
+            except Exception as e:
+                import traceback
+                result["error"] = str(e)
+                result["traceback"] = traceback.format_exc()
+
+        self._invoke(callback)
+        return result
+
+    def expand_cbuffer_member(self, event_id, cbuffer_slot, member_path,
+                              stage="pixel", expand_depth=2, member_limit=-1):
+        """Drill into a deep cbuffer member by dotted/index path.
+
+        Path examples: ``_child0[10]``, ``matrix.row0[2]``,
+        ``LocalFogPackedParams.x``.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {
+            "success": False,
+            "event_id": event_id,
+            "cbuffer_slot": cbuffer_slot,
+            "path": member_path,
+            "stage": stage,
+        }
+
+        def callback(controller):
+            try:
+                controller.SetFrameEvent(event_id, True)
+                stage_enum = Helpers.parse_stage_string(stage)
+
+                pipe = controller.GetPipelineState()
+                shader = pipe.GetShader(stage_enum)
+                reflection = pipe.GetShaderReflection(stage_enum)
+                if not Helpers.is_reflection_valid(reflection):
+                    result["error"] = "No reflection for %s shader" % stage
+                    return
+
+                api_type = controller.GetAPIProperties().pipelineType
+                is_opengl = (api_type == rd.GraphicsAPI.OpenGL)
+
+                cb_block, cb_idx = self._find_cb_block(reflection, cbuffer_slot)
+                if cb_block is None:
+                    result["error"] = "Cbuffer slot b%d not found" % cbuffer_slot
+                    return
+
+                slot = self._slot_of_block(cb_block, cb_idx)
+                res_id, byte_off, byte_sz = self._resolve_cb_binding(
+                    controller, pipe, stage_enum, slot, cb_idx, is_opengl, cb_block,
+                )
+
+                vars_list = self._fetch_cbuffer_variables(
+                    controller, pipe, shader, reflection, stage_enum, slot, cb_idx,
+                    res_id, byte_off, byte_sz, is_opengl,
+                )
+                vars_list = list(vars_list or [])
+                if (is_opengl
+                        and len(vars_list) == 1
+                        and len(getattr(vars_list[0], "members", []) or []) > 0):
+                    vars_list = list(vars_list[0].members)
+
+                target = Serializers.find_member_by_path(vars_list, member_path)
+                if target is None:
+                    result["error"] = "Path '%s' not found in cbuffer b%d" % (
+                        member_path, cbuffer_slot,
+                    )
+                    return
+
+                dumped = Serializers.shader_var_to_dict(
+                    target, expand_depth=expand_depth, member_limit=member_limit,
+                )
+                result.update(dumped)
+                result["success"] = True
+            except Exception as e:
+                import traceback
+                result["error"] = str(e)
+                result["traceback"] = traceback.format_exc()
+
+        self._invoke(callback)
+        return result
+
+    def get_shader_resources(self, event_id, stage):
+        """One-shot dump of every binding for a given shader stage.
+
+        Returns SRVs, UAVs, samplers, and constant buffers (with resolved
+        values) — equivalent to the RenderDoc Pipeline State viewer for
+        that stage.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"stage": stage, "data": None, "error": None}
+
+        def callback(controller):
+            controller.SetFrameEvent(event_id, True)
+            pipe = controller.GetPipelineState()
+            stage_enum = Helpers.parse_stage_string(stage)
+
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                result["error"] = "No %s shader bound" % stage
+                return
+
+            reflection = pipe.GetShaderReflection(stage_enum)
+
+            data = {
+                "event_id": event_id,
+                "stage": stage,
+                "shader_id": str(shader),
+                "entry_point": pipe.GetShaderEntryPoint(stage_enum),
+            }
+
+            data["resources"] = self._get_stage_resources(controller, pipe, stage_enum, reflection)
+            data["uavs"] = self._get_stage_uavs(controller, pipe, stage_enum, reflection)
+            data["samplers"] = self._get_stage_samplers(pipe, stage_enum, reflection)
+
+            if Helpers.is_reflection_valid(reflection):
+                data["constant_buffers"] = self._get_cbuffer_info(
+                    controller, pipe, reflection, stage_enum, shader,
+                    expand_depth=2, member_limit=-1,
+                )
+
+            result["data"] = data
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]
+
+    # =================================================================
+    # Internal: stage binding extractors (SRV/UAV/Sampler)
+    # =================================================================
 
     def _get_stage_resources(self, controller, pipe, stage, reflection):
         """Get shader resource views (SRVs) for a stage"""
@@ -283,10 +474,8 @@ class PipelineService:
 
                 try:
                     samp_info["border_color"] = [
-                        desc.borderColor[0],
-                        desc.borderColor[1],
-                        desc.borderColor[2],
-                        desc.borderColor[3],
+                        desc.borderColor[0], desc.borderColor[1],
+                        desc.borderColor[2], desc.borderColor[3],
                     ]
                 except (AttributeError, TypeError):
                     pass
@@ -302,35 +491,247 @@ class PipelineService:
 
         return samplers
 
-    def _get_stage_cbuffers(self, controller, pipe, stage, reflection):
-        """Get constant buffers for a stage from shader reflection"""
+    def _get_stage_cbuffers_meta(self, reflection):
+        """Lightweight cbuffer descriptors only (no values)."""
         cbuffers = []
         try:
             if not reflection:
                 return cbuffers
 
-            for cb in reflection.constantBlocks:
-                slot = cb.bindPoint if hasattr(cb, 'bindPoint') else cb.fixedBindNumber
+            for cb_idx, cb in enumerate(reflection.constantBlocks):
+                slot = self._slot_of_block(cb, cb_idx)
                 cb_info = {
                     "slot": slot,
                     "name": cb.name,
-                    "byte_size": cb.byteSize,
+                    "byte_size": sanitize_sentinel(getattr(cb, "byteSize", 0)),
                     "variable_count": len(cb.variables) if cb.variables else 0,
-                    "variables": [],
                 }
-                if cb.variables:
-                    for var in cb.variables:
-                        cb_info["variables"].append({
-                            "name": var.name,
-                            "byte_offset": var.byteOffset,
-                            "type": str(var.type.name) if var.type else "",
-                        })
                 cbuffers.append(cb_info)
-
         except Exception as e:
             cbuffers.append({"error": str(e)})
 
         return cbuffers
+
+    # =================================================================
+    # Internal: cbuffer value extraction (D3D / Vulkan / GL)
+    # =================================================================
+
+    def _slot_of_block(self, cb_block, cb_idx):
+        """Read the real bind slot from a ConstantBlock, falling back to index."""
+        return getattr(
+            cb_block, "fixedBindNumber",
+            getattr(cb_block, "bindPoint", cb_idx),
+        )
+
+    def _find_cb_block(self, reflection, cbuffer_slot):
+        """Find the ConstantBlock matching cbuffer_slot. Returns (block, idx)."""
+        for cb_idx, cb in enumerate(reflection.constantBlocks):
+            slot = self._slot_of_block(cb, cb_idx)
+            if cbuffer_slot is None or slot == cbuffer_slot:
+                return cb, cb_idx
+        return None, -1
+
+    def _resolve_cb_binding(self, controller, pipe, stage, slot, cb_idx, is_opengl, cb_block):
+        """Locate the bound buffer (resource_id, byte_offset, byte_size) for a CB.
+
+        Handles three API families:
+        * D3D11/12, Vulkan -> GetConstantBlock(stage, slot, 0)
+        * OpenGL/GLES      -> GetDescriptorAccess + GetDescriptors
+        """
+        default_size = sanitize_sentinel(getattr(cb_block, "byteSize", 0)) or 0
+        res_id = rd.ResourceId.Null()
+        byte_off = 0
+        byte_sz = default_size
+
+        if is_opengl:
+            try:
+                gl_state = controller.GetGLPipelineState()
+                accesses = controller.GetDescriptorAccess()
+                desc_store = getattr(gl_state, "descriptorStore", rd.ResourceId.Null())
+                for acc in accesses:
+                    try:
+                        if (int(getattr(acc, "type", -1)) == 1  # ConstantBuffer
+                                and int(getattr(acc, "stage", -1)) == int(stage)
+                                and int(getattr(acc, "index", -1)) == cb_idx):
+                            dr = rd.DescriptorRange()
+                            dr.offset = acc.byteOffset
+                            dr.count = 1
+                            descs = controller.GetDescriptors(desc_store, [dr])
+                            if descs:
+                                d = descs[0]
+                                res_id = getattr(d, "resource", rd.ResourceId.Null())
+                                byte_off = getattr(d, "byteOffset", 0)
+                                raw_sz = sanitize_sentinel(getattr(d, "byteSize", 0))
+                                if raw_sz is not None:
+                                    byte_sz = raw_sz
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return res_id, byte_off, byte_sz
+
+        # D3D11 / D3D12 / Vulkan
+        try:
+            used_desc = pipe.GetConstantBlock(stage, slot, 0)
+            desc_info = getattr(used_desc, "descriptor", None)
+            if desc_info is not None:
+                res_id = getattr(desc_info, "resource", res_id) or res_id
+                byte_off = getattr(desc_info, "byteOffset", 0)
+                raw_sz = sanitize_sentinel(getattr(desc_info, "byteSize", 0))
+                if raw_sz is not None:
+                    byte_sz = raw_sz
+        except Exception:
+            try:
+                all_cbs = pipe.GetConstantBlocks(stage, True)
+                for ud in all_cbs:
+                    acc = getattr(ud, "access", None)
+                    if acc and int(getattr(acc, "index", -1)) == slot:
+                        desc_info = getattr(ud, "descriptor", None)
+                        if desc_info:
+                            res_id = getattr(desc_info, "resource", res_id) or res_id
+                            byte_off = getattr(desc_info, "byteOffset", 0)
+                            raw_sz = sanitize_sentinel(getattr(desc_info, "byteSize", 0))
+                            if raw_sz is not None:
+                                byte_sz = raw_sz
+                        break
+            except Exception:
+                pass
+
+        return res_id, byte_off, byte_sz
+
+    def _fetch_cbuffer_variables(self, controller, pipe, shader, reflection,
+                                  stage, slot, cb_idx, res_id, byte_off, byte_sz,
+                                  is_opengl):
+        """Call GetCBufferVariableContents with the right signature for the API."""
+        if res_id is None:
+            res_id = rd.ResourceId.Null()
+        ep = pipe.GetShaderEntryPoint(stage)
+        ep_str = ep if isinstance(ep, str) else getattr(ep, "name", str(ep))
+        pipe_obj = Helpers.get_pipeline_object(pipe)
+
+        if is_opengl:
+            gl_state = controller.GetGLPipelineState()
+            gl_attr_map = {
+                rd.ShaderStage.Vertex: "vertexShader",
+                rd.ShaderStage.Fragment: "fragmentShader",
+                rd.ShaderStage.Pixel: "fragmentShader",
+                rd.ShaderStage.Geometry: "geometryShader",
+                rd.ShaderStage.Hull: "tessControlShader",
+                rd.ShaderStage.Domain: "tessEvalShader",
+                rd.ShaderStage.Compute: "computeShader",
+            }
+            attr = gl_attr_map.get(stage, "vertexShader")
+            gl_ss = getattr(gl_state, attr, None)
+            prog_id = (getattr(gl_ss, "programResourceId", rd.ResourceId.Null())
+                       if gl_ss else rd.ResourceId.Null())
+            shader_id2 = (getattr(gl_ss, "shaderResourceId", rd.ResourceId.Null())
+                          if gl_ss else rd.ResourceId.Null())
+            # GLES uses the enumerated UBO block index, not fixedBindNumber.
+            return controller.GetCBufferVariableContents(
+                prog_id, shader_id2, stage, ep_str,
+                cb_idx, res_id, byte_off, byte_sz,
+            )
+
+        # D3D / Vulkan: 8-arg signature, with 7-arg fallback.
+        try:
+            return controller.GetCBufferVariableContents(
+                pipe_obj, shader, stage, ep_str, slot, res_id, byte_off, byte_sz,
+            )
+        except TypeError:
+            return controller.GetCBufferVariableContents(
+                shader, stage, ep_str, slot, res_id, byte_off, byte_sz,
+            )
+
+    def _get_cbuffer_info(self, controller, pipe, reflection, stage, shader,
+                          expand_depth=2, member_limit=-1, cbuffer_slot=None,
+                          member_offset=0):
+        """Comprehensive constant-buffer dump for a shader stage.
+
+        Resolves bound resource ID, range, then calls GetCBufferVariableContents
+        with the API-appropriate signature. Returns one entry per CB block
+        (filtered by cbuffer_slot if provided), each carrying resolved
+        ``variables`` (recursively serialized) plus pagination info.
+        """
+        cbuffers = []
+        if not Helpers.is_reflection_valid(reflection):
+            return cbuffers
+
+        api_type = controller.GetAPIProperties().pipelineType
+        is_opengl = (api_type == rd.GraphicsAPI.OpenGL)
+
+        for cb_idx, cb_block in enumerate(reflection.constantBlocks):
+            slot = self._slot_of_block(cb_block, cb_idx)
+            if cbuffer_slot is not None and slot != cbuffer_slot:
+                continue
+
+            cb_entry = {
+                "slot": slot,
+                "name": cb_block.name,
+                "byte_size": sanitize_sentinel(getattr(cb_block, "byteSize", 0)),
+                "variable_count": len(cb_block.variables) if cb_block.variables else 0,
+                "bound_resource": None,
+                "bound_name": None,
+                "variables": [],
+            }
+
+            # 1) Resolve the actual bound buffer + range.
+            try:
+                res_id, byte_off, byte_sz = self._resolve_cb_binding(
+                    controller, pipe, stage, slot, cb_idx, is_opengl, cb_block,
+                )
+                if res_id and str(res_id) not in ("ResourceId::0", "None", ""):
+                    cb_entry["bound_resource"] = str(res_id)
+                    cb_entry["bound_name"] = Helpers.get_resource_name(self.ctx, res_id)
+                cb_entry["byte_offset"] = byte_off
+                cb_entry["byte_range"] = byte_sz
+            except Exception as e:
+                cb_entry["bind_error"] = str(e)
+                res_id, byte_off, byte_sz = rd.ResourceId.Null(), 0, cb_entry["byte_size"] or 0
+
+            # 2) Pull the resolved variable values.
+            try:
+                vars_list = self._fetch_cbuffer_variables(
+                    controller, pipe, shader, reflection, stage, slot, cb_idx,
+                    res_id, byte_off, byte_sz, is_opengl,
+                )
+                vars_list = list(vars_list or [])
+
+                # GLES often returns a single root struct holding all members;
+                # unwrap so callers see top-level uniforms.
+                if (is_opengl
+                        and len(vars_list) == 1
+                        and len(getattr(vars_list[0], "members", []) or []) > 0):
+                    vars_list = list(vars_list[0].members)
+
+                total_members = len(vars_list)
+                if member_limit == -1:
+                    page = vars_list[member_offset:]
+                else:
+                    page = vars_list[member_offset:member_offset + member_limit]
+
+                cb_entry["variables"] = Serializers.serialize_variables(
+                    page, expand_depth=expand_depth, member_limit=member_limit,
+                )
+                cb_entry["total_members"] = total_members
+                cb_entry["member_offset"] = member_offset
+                cb_entry["member_limit"] = member_limit
+                if member_limit == -1:
+                    cb_entry["has_more_members"] = False
+                else:
+                    cb_entry["has_more_members"] = (
+                        member_offset + member_limit < total_members
+                    )
+            except Exception as e:
+                cb_entry["data_error"] = str(e)
+
+            cbuffers.append(cb_entry)
+
+        return cbuffers
+
+    # =================================================================
+    # Internal: misc
+    # =================================================================
 
     def _get_resource_details(self, controller, resource_id):
         """Get details about a resource (texture or buffer)"""
@@ -364,66 +765,29 @@ class PipelineService:
 
         return details
 
-    def _get_cbuffer_info(self, controller, pipe, reflection, stage):
-        """Get constant buffer information and values"""
-        cbuffers = []
-
-        for i, cb in enumerate(reflection.constantBlocks):
-            cb_info = {
-                "name": cb.name,
-                "slot": i,
-                "size": cb.byteSize,
-                "variables": [],
-            }
-
-            try:
-                bind = pipe.GetConstantBuffer(stage, i, 0)
-                if bind.resourceId != rd.ResourceId.Null():
-                    variables = controller.GetCBufferVariableContents(
-                        pipe.GetGraphicsPipelineObject(),
-                        reflection.resourceId,
-                        stage,
-                        reflection.entryPoint,
-                        i,
-                        bind.resourceId,
-                        bind.byteOffset,
-                        bind.byteSize,
-                    )
-                    cb_info["variables"] = Serializers.serialize_variables(variables)
-            except Exception as e:
-                cb_info["error"] = str(e)
-
-            cbuffers.append(cb_info)
-
-        return cbuffers
-
     def _get_resource_bindings(self, reflection):
-        """Get shader resource bindings"""
+        """Get shader resource bindings from reflection"""
         resources = []
 
         try:
             for res in reflection.readOnlyResources:
-                resources.append(
-                    {
-                        "name": res.name,
-                        "type": str(res.resType),
-                        "binding": res.fixedBindNumber,
-                        "access": "ReadOnly",
-                    }
-                )
+                resources.append({
+                    "name": res.name,
+                    "type": str(res.resType),
+                    "binding": res.fixedBindNumber,
+                    "access": "ReadOnly",
+                })
         except Exception:
             pass
 
         try:
             for res in reflection.readWriteResources:
-                resources.append(
-                    {
-                        "name": res.name,
-                        "type": str(res.resType),
-                        "binding": res.fixedBindNumber,
-                        "access": "ReadWrite",
-                    }
-                )
+                resources.append({
+                    "name": res.name,
+                    "type": str(res.resType),
+                    "binding": res.fixedBindNumber,
+                    "access": "ReadWrite",
+                })
         except Exception:
             pass
 

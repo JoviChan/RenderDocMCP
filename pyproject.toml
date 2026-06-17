@@ -1,6 +1,6 @@
 [project]
 name = "renderdoc-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "MCP server for RenderDoc graphics debugging"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_server"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"renderdoc_extension" = "mcp_server/_extension_payload"
 
 [tool.uv]
 package = true

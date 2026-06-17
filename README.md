@@ -1,152 +1,130 @@
 # RenderDoc MCP Server
 
-RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタントがRenderDocのキャプチャデータにアクセスし、グラフィックスデバッグを支援する。
+让 AI 助手（Claude / Cursor / Cline / CodeMaker 等）可以直接读取 RenderDoc 抓帧数据，
+进行图形调试和性能分析。**核心能力是抓取每个 draw call 的细节信息——包括 constant buffer / uniform buffer 的具名变量值**。
 
-## アーキテクチャ
+## 核心特性
 
-```
-Claude/AI Client (stdio)
-        │
-        ▼
-MCP Server Process (Python + FastMCP 2.0)
-        │ File-based IPC (%TEMP%/renderdoc_mcp/)
-        ▼
-RenderDoc Process (Extension)
-```
+- 🎯 **完整 cbuffer / uniform buffer 值解析** — 覆盖 D3D11/D3D12/Vulkan/OpenGL/OpenGL ES（移动端）
+- 🔍 **支持递归展开** struct / array / 矩阵嵌套；按路径精确钻取
+- 📊 一次拉取某个 draw 在某个 stage 的所有绑定（SRV / UAV / Sampler / CBuffer + 值）
+- 📦 资源目录（textures / buffers）+ 类型化 buffer 读取（无需 base64 解码）
+- ⚡ **傻瓜式安装** — `uvx --from git+https://github.com/halby24/RenderDocMCP.git`，扩展端首次启动自动安装/升级
 
-RenderDoc内蔵のPythonにはsocketモジュールがないため、ファイルベースのIPCで通信を行う。
+## 一键安装
 
-## セットアップ
-
-### 1. RenderDoc拡張機能のインストール
-
-```bash
-python scripts/install_extension.py
-```
-
-拡張機能は `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge` にインストールされる。
-
-### 2. RenderDocで拡張機能を有効化
-
-1. RenderDocを起動
-2. Tools > Manage Extensions
-3. "RenderDoc MCP Bridge" を有効化
-
-### 3. MCPサーバーのインストール
-
-```bash
-uv tool install
-uv tool update-shell  # PATHに追加
-```
-
-シェルを再起動すると `renderdoc-mcp` コマンドが使えるようになる。
-
-> **Note**: `--editable` を付けると、ソースコードの変更が即座に反映される（開発時に便利）。
-> 安定版としてインストールする場合は `uv tool install .` を使用。
-
-### 4. MCPクライアントの設定
-
-#### Claude Desktop
-
-`claude_desktop_config.json` に追加:
+在 MCP 客户端配置里加上：
 
 ```json
 {
   "mcpServers": {
     "renderdoc": {
-      "command": "renderdoc-mcp"
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/halby24/RenderDocMCP.git", "renderdoc-mcp"]
     }
   }
 }
 ```
 
-#### Claude Code
+首次启动时会自动把 RenderDoc 扩展安装到 `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`（或 Linux/macOS 对应目录）。
+之后在 RenderDoc 里 **Tools → Manage Extensions** 勾选 `RenderDoc MCP Bridge` 并重启 RenderDoc 即可。
 
-`.mcp.json` に追加:
+后续版本升级时（`uvx` 重装包），扩展端会通过版本号比对自动覆盖更新，**不再需要手动重装**。
 
-```json
-{
-  "mcpServers": {
-    "renderdoc": {
-      "command": "renderdoc-mcp"
-    }
-  }
-}
-```
-
-## 使い方
-
-1. RenderDocを起動し、キャプチャファイル (.rdc) を開く
-2. MCPクライアント (Claude等) から RenderDoc のデータにアクセス
-
-## MCPツール一覧
-
-| ツール | 説明 |
-|--------|------|
-| `get_capture_status` | キャプチャの読み込み状態を確認 |
-| `get_draw_calls` | ドローコール一覧を階層構造で取得 |
-| `get_draw_call_details` | 特定のドローコールの詳細情報を取得 |
-| `get_shader_info` | シェーダーのソースコード・定数バッファの値を取得 |
-| `get_buffer_contents` | バッファの内容を取得 (Base64) |
-| `get_texture_info` | テクスチャのメタデータを取得 |
-| `get_texture_data` | テクスチャのピクセルデータを取得 (Base64) |
-| `get_pipeline_state` | パイプライン状態を取得 |
-
-## 使用例
-
-### ドローコール一覧の取得
+## 架构
 
 ```
-get_draw_calls(include_children=true)
+AI 客户端 (stdio)
+       │
+       ▼
+MCP 服务进程 (Python + FastMCP)
+       │ File-based IPC (%TEMP%/renderdoc_mcp/)
+       ▼
+RenderDoc 进程 (Bridge Extension，运行在 qrenderdoc 内置 Python 中)
 ```
 
-### シェーダー情報の取得
+RenderDoc 内置的 Python 没有 socket 模块，所以走文件 IPC。
 
+## MCP 工具一览
+
+### 帧/管线分析
+| 工具 | 说明 |
+|------|------|
+| `get_capture_status` | 当前是否加载了 capture |
+| `get_frame_summary` | 整帧总览（API、统计、顶层 marker、资源数量） |
+| `detect_engine` | 启发式识别引擎（Unity / Unreal / NeoX） |
+| `get_draw_calls` | 拉取 draw call 树（支持 marker_filter / event_id 区间过滤） |
+| `get_draw_call_details` | 单个 draw 的详细信息 |
+| `get_action_timings` | GPU 计时（每个 event 的耗时） |
+| `get_dispatches` | 列出所有 Compute Dispatch |
+| `get_pass_drawcalls` | 同一 render pass 内的所有 draw |
+| `get_pipeline_state` | 完整 pipeline state（默认带 cbuffer 值） |
+
+### Shader / Constant Buffer ⭐ 新增
+| 工具 | 说明 |
+|------|------|
+| `get_shader_info` | 单个 stage 的 shader 反汇编 + cbuffer 值 + 资源绑定 |
+| `get_shader_resources` | 单 stage 的全部绑定（SRV+UAV+Sampler+CBuffer 值） |
+| **`get_cbuffer_values`** | **专用：单个 draw 的 cbuffer/uniform 实际值（具名变量）** |
+| **`expand_cbuffer_member`** | **按路径钻取深层成员（数组/嵌套 struct）** |
+
+### 反向查找
+| 工具 | 说明 |
+|------|------|
+| `find_draws_by_shader` | 按 shader 名找 draw |
+| `find_draws_by_texture` | 按贴图名找 draw |
+| `find_draws_by_resource` | 按 ResourceId 找 draw |
+
+### 资源
+| 工具 | 说明 |
+|------|------|
+| `list_textures` | 列出所有贴图（支持名字过滤） |
+| `list_buffers` | 列出所有 buffer |
+| `get_texture_info` | 贴图元信息 |
+| `get_texture_data` | 贴图像素（Base64） |
+| `get_buffer_contents` | buffer 原始数据（Base64） |
+| **`read_buffer_typed`** | **按类型读 buffer（float32/uint16/...）直接返回数值** |
+
+### Capture 管理
+| 工具 | 说明 |
+|------|------|
+| `list_captures` | 列出目录下的 .rdc 文件 |
+| `open_capture` | 打开指定 capture |
+
+## 使用示例
+
+### 抓 cbuffer 具名变量值（修复 #1 — 美术常用）
 ```
-get_shader_info(event_id=123, stage="pixel")
+get_cbuffer_values(event_id=7538, stage="pixel")
+# → 返回每个 cbuffer 的 slot/name/byte_size/bound_resource，
+#    以及 variables: [{name: "VolumeWeight", type: "float", value: 0.0}, ...]
 ```
 
-### パイプライン状態の取得
-
+### 钻取嵌套数组 / struct
 ```
-get_pipeline_state(event_id=123)
-```
-
-### テクスチャデータの取得
-
-```
-# 2Dテクスチャのmip 0を取得
-get_texture_data(resource_id="ResourceId::123")
-
-# 特定のmipレベルを取得
-get_texture_data(resource_id="ResourceId::123", mip=2)
-
-# キューブマップの特定の面を取得 (0=X+, 1=X-, 2=Y+, 3=Y-, 4=Z+, 5=Z-)
-get_texture_data(resource_id="ResourceId::456", slice=3)
-
-# 3Dテクスチャの特定の深度スライスを取得
-get_texture_data(resource_id="ResourceId::789", depth_slice=5)
+expand_cbuffer_member(event_id=7538, cbuffer_slot=3,
+                      member_path="VolumetricFogParamsArray[5].density")
 ```
 
-### バッファデータの部分取得
-
+### 一次拉单 stage 全部绑定
 ```
-# バッファ全体を取得
-get_buffer_contents(resource_id="ResourceId::123")
-
-# オフセット256から512バイト取得
-get_buffer_contents(resource_id="ResourceId::123", offset=256, length=512)
+get_shader_resources(event_id=7538, stage="pixel")
 ```
 
-## 要件
+### 类型化 buffer 读取
+```
+read_buffer_typed(resource_id="ResourceId::123",
+                  data_type="float32", components=3, count=1024)
+# → values: [[x,y,z], [x,y,z], ...]  无需自己 base64 解码
+```
+
+## 要求
 
 - Python 3.10+
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/)（用于 `uvx` 启动）
 - RenderDoc 1.20+
+- 已验证：Windows + D3D11 / D3D12 / Vulkan / OpenGL ES（移动端）
 
-> **Note**: 動作確認はWindows + DirectX 11環境でのみ行っています。
-> Linux/macOS + Vulkan/OpenGL環境でも動作する可能性がありますが、未検証です。
-
-## ライセンス
+## License
 
 MIT

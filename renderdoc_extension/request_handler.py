@@ -23,9 +23,18 @@ class RequestHandler:
             "get_action_timings": self._handle_get_action_timings,
             "get_shader_info": self._handle_get_shader_info,
             "get_buffer_contents": self._handle_get_buffer_contents,
+            "read_buffer_typed": self._handle_read_buffer_typed,
             "get_texture_info": self._handle_get_texture_info,
             "get_texture_data": self._handle_get_texture_data,
+            "list_textures": self._handle_list_textures,
+            "list_buffers": self._handle_list_buffers,
             "get_pipeline_state": self._handle_get_pipeline_state,
+            "get_cbuffer_values": self._handle_get_cbuffer_values,
+            "expand_cbuffer_member": self._handle_expand_cbuffer_member,
+            "get_shader_resources": self._handle_get_shader_resources,
+            "get_dispatches": self._handle_get_dispatches,
+            "get_pass_drawcalls": self._handle_get_pass_drawcalls,
+            "detect_engine": self._handle_detect_engine,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
         }
@@ -168,7 +177,87 @@ class RequestHandler:
         event_id = params.get("event_id")
         if event_id is None:
             raise ValueError("event_id is required")
-        return self.facade.get_pipeline_state(int(event_id))
+        include_cbuffer_values = params.get("include_cbuffer_values", True)
+        return self.facade.get_pipeline_state(int(event_id), include_cbuffer_values)
+
+    def _handle_get_cbuffer_values(self, params):
+        """Handle get_cbuffer_values request"""
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        stage = params.get("stage", "pixel")
+        cbuffer_slot = params.get("cbuffer_slot")
+        if cbuffer_slot is not None:
+            cbuffer_slot = int(cbuffer_slot)
+        expand_depth = int(params.get("expand_depth", 2))
+        member_offset = int(params.get("member_offset", 0))
+        member_limit = int(params.get("member_limit", -1))
+        return self.facade.get_cbuffer_values(
+            int(event_id), stage, cbuffer_slot, expand_depth, member_offset, member_limit
+        )
+
+    def _handle_expand_cbuffer_member(self, params):
+        """Handle expand_cbuffer_member request"""
+        event_id = params.get("event_id")
+        cbuffer_slot = params.get("cbuffer_slot")
+        member_path = params.get("member_path")
+        if event_id is None or cbuffer_slot is None or member_path is None:
+            raise ValueError("event_id, cbuffer_slot, member_path are required")
+        stage = params.get("stage", "pixel")
+        expand_depth = int(params.get("expand_depth", 2))
+        member_limit = int(params.get("member_limit", -1))
+        return self.facade.expand_cbuffer_member(
+            int(event_id), int(cbuffer_slot), str(member_path),
+            stage, expand_depth, member_limit,
+        )
+
+    def _handle_get_shader_resources(self, params):
+        """Handle get_shader_resources request"""
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None or stage is None:
+            raise ValueError("event_id and stage are required")
+        return self.facade.get_shader_resources(int(event_id), stage)
+
+    def _handle_read_buffer_typed(self, params):
+        """Handle read_buffer_typed request"""
+        resource_id = params.get("resource_id")
+        if resource_id is None:
+            raise ValueError("resource_id is required")
+        offset = int(params.get("offset", 0))
+        count = int(params.get("count", 64))
+        data_type = params.get("data_type", "float32")
+        components = int(params.get("components", 4))
+        return self.facade.read_buffer_typed(
+            resource_id, offset, count, data_type, components
+        )
+
+    def _handle_list_textures(self, params):
+        """Handle list_textures request"""
+        return self.facade.list_textures(params.get("name_filter"))
+
+    def _handle_list_buffers(self, params):
+        """Handle list_buffers request"""
+        return self.facade.list_buffers(params.get("name_filter"))
+
+    def _handle_get_dispatches(self, params):
+        """Handle get_dispatches request"""
+        return self.facade.get_dispatches(
+            event_id_min=params.get("event_id_min"),
+            event_id_max=params.get("event_id_max"),
+            marker_filter=params.get("marker_filter"),
+        )
+
+    def _handle_get_pass_drawcalls(self, params):
+        """Handle get_pass_drawcalls request"""
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        return self.facade.get_pass_drawcalls(int(event_id))
+
+    def _handle_detect_engine(self, params):
+        """Handle detect_engine request"""
+        return self.facade.detect_engine()
 
     def _handle_list_captures(self, params):
         """Handle list_captures request"""
