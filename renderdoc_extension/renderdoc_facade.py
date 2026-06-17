@@ -182,3 +182,81 @@ class RenderDocFacade:
     def detect_engine(self):
         """Heuristic engine detection from marker patterns."""
         return self._action.detect_engine()
+
+    def analyze_rdc(self):
+        """Comprehensive frame analysis."""
+        return self._action.analyze_rdc()
+
+    def get_frame_hierarchy(self, max_depth=3):
+        """Marker-only tree."""
+        return self._action.get_frame_hierarchy(max_depth)
+
+    def search_actions(self, name_pattern=None, marker_filter=None,
+                       event_id_min=None, event_id_max=None, flags=None, limit=200):
+        """Flexible action search."""
+        return self._action.search_actions(
+            name_pattern, marker_filter, event_id_min, event_id_max, flags, limit
+        )
+
+    def get_drawcall_summary(self, event_id_min=None, event_id_max=None,
+                              marker_filter=None, limit=500):
+        """Concise per-draw rows."""
+        return self._action.get_drawcall_summary(
+            event_id_min, event_id_max, marker_filter, limit
+        )
+
+    def get_drawcall_stats(self):
+        """Aggregate draw-call statistics."""
+        return self._action.get_drawcall_stats()
+
+    def get_all_passes(self):
+        """List every render pass."""
+        return self._action.get_all_passes()
+
+    def get_buffer_operations(self, event_id_min=None, event_id_max=None):
+        """Copy/Resolve/GenMips/Clear events."""
+        return self._action.get_buffer_operations(event_id_min, event_id_max)
+
+    # ==================== Resource Stats / Search ====================
+
+    def get_resource_overview(self):
+        """High-level resource summary."""
+        return self._resource.get_resource_overview()
+
+    def get_texture_stats(self, top_n=10):
+        """Texture distribution stats."""
+        return self._resource.get_texture_stats(top_n)
+
+    def get_buffer_stats(self, top_n=10):
+        """Buffer distribution stats."""
+        return self._resource.get_buffer_stats(top_n)
+
+    def search_texture(self, name=None, format=None, min_width=None,
+                       min_height=None, limit=200):
+        """Find textures by name / format / dimensions."""
+        return self._resource.search_texture(
+            name, format, min_width, min_height, limit
+        )
+
+    def search_buffer(self, resource_id, target_value, data_type="float32",
+                       components=1, tolerance=1e-4, max_results=20,
+                       offset=0, length=0):
+        """Locate occurrences of a numeric value inside a buffer."""
+        return self._resource.search_buffer(
+            resource_id, target_value, data_type, components, tolerance,
+            max_results, offset, length,
+        )
+
+    # ==================== Shader Disassembly / Decompilation ====================
+
+    def list_disassembly_targets(self):
+        """Available disassembly targets."""
+        return self._pipeline.list_disassembly_targets()
+
+    def disassemble_shader(self, event_id, stage, target=None):
+        """Get raw disassembly with target selection."""
+        return self._pipeline.disassemble_shader(event_id, stage, target)
+
+    def decompile_shader(self, event_id, stage, language="hlsl"):
+        """Decompile to HLSL/GLSL."""
+        return self._pipeline.decompile_shader(event_id, stage, language)

@@ -378,3 +378,251 @@ class ResourceService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["data"]
+
+    # =================================================================
+    # Stats & Search
+    # =================================================================
+
+    def get_resource_overview(self):
+        """High-level resource summary: counts + total bytes for textures/buffers."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"overview": None}
+
+        def callback(controller):
+            tex_total_bytes = 0
+            for tex in controller.GetTextures():
+                tex_total_bytes += tex.byteSize or 0
+            buf_total_bytes = 0
+            for buf in controller.GetBuffers():
+                buf_total_bytes += buf.length or 0
+
+            result["overview"] = {
+                "texture_count": len(controller.GetTextures()),
+                "texture_total_bytes": tex_total_bytes,
+                "texture_total_mb": round(tex_total_bytes / 1024 / 1024, 2),
+                "buffer_count": len(controller.GetBuffers()),
+                "buffer_total_bytes": buf_total_bytes,
+                "buffer_total_mb": round(buf_total_bytes / 1024 / 1024, 2),
+            }
+
+        self._invoke(callback)
+        return result
+
+    def get_texture_stats(self, top_n=10):
+        """Texture distribution: by format, by size bucket, top-N by bytes."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"stats": None}
+
+        def callback(controller):
+            by_format = {}
+            by_dimension = {}
+            size_buckets = {"<=1MB": 0, "<=4MB": 0, "<=16MB": 0, "<=64MB": 0, ">64MB": 0}
+            top = []
+
+            for tex in controller.GetTextures():
+                fmt = str(tex.format.Name())
+                by_format[fmt] = by_format.get(fmt, 0) + 1
+
+                dim = str(tex.type)
+                by_dimension[dim] = by_dimension.get(dim, 0) + 1
+
+                size = tex.byteSize or 0
+                if size <= 1024 * 1024: size_buckets["<=1MB"] += 1
+                elif size <= 4 * 1024 * 1024: size_buckets["<=4MB"] += 1
+                elif size <= 16 * 1024 * 1024: size_buckets["<=16MB"] += 1
+                elif size <= 64 * 1024 * 1024: size_buckets["<=64MB"] += 1
+                else: size_buckets[">64MB"] += 1
+
+                top.append({
+                    "resource_id": str(tex.resourceId),
+                    "name": self._resource_name(tex.resourceId),
+                    "width": tex.width, "height": tex.height,
+                    "mips": tex.mips, "format": fmt,
+                    "byte_size": size,
+                })
+
+            top.sort(key=lambda x: -x["byte_size"])
+
+            result["stats"] = {
+                "total_count": len(controller.GetTextures()),
+                "by_format": by_format,
+                "by_dimension": by_dimension,
+                "size_buckets": size_buckets,
+                "top_n": top[:top_n],
+            }
+
+        self._invoke(callback)
+        return result
+
+    def get_buffer_stats(self, top_n=10):
+        """Buffer distribution: total bytes, size buckets, top-N by size."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"stats": None}
+
+        def callback(controller):
+            size_buckets = {"<=4KB": 0, "<=64KB": 0, "<=1MB": 0, "<=16MB": 0, ">16MB": 0}
+            total_bytes = 0
+            top = []
+
+            for buf in controller.GetBuffers():
+                size = buf.length or 0
+                total_bytes += size
+                if size <= 4 * 1024: size_buckets["<=4KB"] += 1
+                elif size <= 64 * 1024: size_buckets["<=64KB"] += 1
+                elif size <= 1024 * 1024: size_buckets["<=1MB"] += 1
+                elif size <= 16 * 1024 * 1024: size_buckets["<=16MB"] += 1
+                else: size_buckets[">16MB"] += 1
+
+                top.append({
+                    "resource_id": str(buf.resourceId),
+                    "name": self._resource_name(buf.resourceId),
+                    "length": size,
+                })
+
+            top.sort(key=lambda x: -x["length"])
+
+            result["stats"] = {
+                "total_count": len(controller.GetBuffers()),
+                "total_bytes": total_bytes,
+                "total_mb": round(total_bytes / 1024 / 1024, 2),
+                "size_buckets": size_buckets,
+                "top_n": top[:top_n],
+            }
+
+        self._invoke(callback)
+        return result
+
+    def search_texture(self, name=None, format=None, min_width=None,
+                       min_height=None, limit=200):
+        """Find textures by name substring / format / dimensions."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"matches": [], "count": 0}
+        n_low = name.lower() if name else None
+
+        def callback(controller):
+            for tex in controller.GetTextures():
+                tex_name = self._resource_name(tex.resourceId) or ""
+                if n_low and n_low not in tex_name.lower():
+                    continue
+                fmt = str(tex.format.Name())
+                if format and format.lower() not in fmt.lower():
+                    continue
+                if min_width is not None and tex.width < min_width:
+                    continue
+                if min_height is not None and tex.height < min_height:
+                    continue
+
+                result["matches"].append({
+                    "resource_id": str(tex.resourceId),
+                    "name": tex_name,
+                    "width": tex.width, "height": tex.height,
+                    "depth": tex.depth, "mips": tex.mips,
+                    "format": fmt,
+                    "byte_size": tex.byteSize,
+                })
+                if len(result["matches"]) >= limit:
+                    break
+
+            result["count"] = len(result["matches"])
+
+        self._invoke(callback)
+        return result
+
+    def search_buffer(self, resource_id, target_value, data_type="float32",
+                       components=1, tolerance=1e-4, max_results=20,
+                       offset=0, length=0):
+        """Locate occurrences of a numeric value inside a buffer.
+
+        Useful for verifying constants pushed into structured buffers
+        (e.g. "find raymarch step count = 64 in this buffer").
+
+        Args:
+            resource_id: Buffer ResourceId.
+            target_value: Number (or list of numbers if components > 1) to find.
+            data_type: float32 / int32 / uint32 / float16 / ...
+            components: 1..4 — search for groups of N consecutive scalars.
+            tolerance: Float compare tolerance.
+            max_results: Cap match count.
+            offset / length: Optional byte range.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        if data_type not in self._TYPED_FORMATS:
+            raise ValueError("Unsupported data_type: %s" % data_type)
+
+        if components > 1 and not isinstance(target_value, (list, tuple)):
+            raise ValueError("target_value must be a list when components > 1")
+        if components == 1 and isinstance(target_value, (list, tuple)):
+            target_value = target_value[0] if target_value else 0
+
+        target = list(target_value) if isinstance(target_value, (list, tuple)) else [target_value]
+        if len(target) != components:
+            raise ValueError("target_value length must equal components")
+
+        fmt_char, elem_size = self._TYPED_FORMATS[data_type]
+        result = {"matches": [], "count": 0}
+
+        def callback(controller):
+            try:
+                rid = Parsers.parse_resource_id(resource_id)
+            except Exception:
+                result["error"] = "Invalid resource ID: %s" % resource_id
+                return
+
+            buf_desc = None
+            for buf in controller.GetBuffers():
+                if buf.resourceId == rid:
+                    buf_desc = buf
+                    break
+            if not buf_desc:
+                result["error"] = "Buffer not found: %s" % resource_id
+                return
+
+            actual_length = length if length > 0 else (buf_desc.length - offset)
+            data = bytes(controller.GetBufferData(rid, offset, actual_length))
+
+            stride = elem_size * components
+            n_groups = len(data) // stride
+            full_fmt = "<" + (fmt_char * components) * n_groups
+            unpacked = struct.unpack(full_fmt, data[:stride * n_groups]) if n_groups else ()
+
+            is_float = data_type in ("float32", "float16", "float64", "float", "half", "double")
+
+            for i in range(n_groups):
+                vec = list(unpacked[i * components:(i + 1) * components])
+                ok = True
+                for j in range(components):
+                    if is_float:
+                        if abs(vec[j] - target[j]) > tolerance:
+                            ok = False
+                            break
+                    else:
+                        if int(vec[j]) != int(target[j]):
+                            ok = False
+                            break
+                if ok:
+                    result["matches"].append({
+                        "byte_offset": offset + i * stride,
+                        "value": vec[0] if components == 1 else vec,
+                    })
+                    if len(result["matches"]) >= max_results:
+                        break
+
+            result["count"] = len(result["matches"])
+            result["target_value"] = target_value
+            result["resource_id"] = resource_id
+
+        self._invoke(callback)
+        if result.get("error"):
+            raise ValueError(result["error"])
+        return result
+

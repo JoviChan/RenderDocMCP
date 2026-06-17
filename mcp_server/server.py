@@ -468,6 +468,232 @@ def detect_engine() -> dict:
 
 
 @mcp.tool
+def analyze_rdc() -> dict:
+    """
+    Comprehensive frame analysis: api type, total actions, draw/dispatch/clear/copy
+    counts, indexed/instanced/indirect breakdown, top-level markers, and resource
+    counts. Use as the first call when starting an investigation.
+    """
+    return bridge.call("analyze_rdc", {})
+
+
+@mcp.tool
+def get_frame_hierarchy(max_depth: int = 3) -> dict:
+    """
+    Marker-only tree (no leaf draws) — fast high-level navigation.
+
+    Args:
+        max_depth: How many marker levels to descend (default 3).
+    """
+    return bridge.call("get_frame_hierarchy", {"max_depth": max_depth})
+
+
+@mcp.tool
+def search_actions(
+    name_pattern: str | None = None,
+    marker_filter: str | None = None,
+    event_id_min: int | None = None,
+    event_id_max: int | None = None,
+    flags: list[str] | None = None,
+    limit: int = 200,
+) -> dict:
+    """
+    Flexible search across all actions: by name substring, marker scope,
+    event-id range, and ActionFlags. Returns event_id + name + flags + marker_path.
+    """
+    p: dict[str, object] = {"limit": limit}
+    if name_pattern is not None: p["name_pattern"] = name_pattern
+    if marker_filter is not None: p["marker_filter"] = marker_filter
+    if event_id_min is not None: p["event_id_min"] = event_id_min
+    if event_id_max is not None: p["event_id_max"] = event_id_max
+    if flags is not None: p["flags"] = flags
+    return bridge.call("search_actions", p)
+
+
+@mcp.tool
+def get_drawcall_summary(
+    event_id_min: int | None = None,
+    event_id_max: int | None = None,
+    marker_filter: str | None = None,
+    limit: int = 500,
+) -> dict:
+    """
+    Concise per-draw rows (event_id, name, indices, instances, marker, PS/VS,
+    render targets). Use this when you want an overview of every draw without
+    the depth of `get_pipeline_state`.
+    """
+    p: dict[str, object] = {"limit": limit}
+    if event_id_min is not None: p["event_id_min"] = event_id_min
+    if event_id_max is not None: p["event_id_max"] = event_id_max
+    if marker_filter is not None: p["marker_filter"] = marker_filter
+    return bridge.call("get_drawcall_summary", p)
+
+
+@mcp.tool
+def get_drawcall_stats() -> dict:
+    """
+    Aggregate statistics across the whole capture: indexed/instanced/indirect
+    counts, indices/instance buckets, top-N pixel shaders and render targets
+    by draw frequency.
+    """
+    return bridge.call("get_drawcall_stats", {})
+
+
+@mcp.tool
+def get_all_passes() -> dict:
+    """
+    List every render pass: BeginPass markers and top-level markers that
+    contain at least one draw.
+    """
+    return bridge.call("get_all_passes", {})
+
+
+@mcp.tool
+def get_buffer_operations(
+    event_id_min: int | None = None,
+    event_id_max: int | None = None,
+) -> dict:
+    """
+    List all non-draw resource operations (Copy / Resolve / GenMips / Clear).
+    """
+    p: dict[str, object] = {}
+    if event_id_min is not None: p["event_id_min"] = event_id_min
+    if event_id_max is not None: p["event_id_max"] = event_id_max
+    return bridge.call("get_buffer_operations", p)
+
+
+@mcp.tool
+def get_resource_overview() -> dict:
+    """
+    High-level resource summary: texture/buffer counts and total bytes.
+    """
+    return bridge.call("get_resource_overview", {})
+
+
+@mcp.tool
+def get_texture_stats(top_n: int = 10) -> dict:
+    """
+    Texture distribution: by format, by dimension, size buckets, top-N by bytes.
+    """
+    return bridge.call("get_texture_stats", {"top_n": top_n})
+
+
+@mcp.tool
+def get_buffer_stats(top_n: int = 10) -> dict:
+    """
+    Buffer distribution: total bytes, size buckets, top-N by length.
+    """
+    return bridge.call("get_buffer_stats", {"top_n": top_n})
+
+
+@mcp.tool
+def search_texture(
+    name: str | None = None,
+    format: str | None = None,
+    min_width: int | None = None,
+    min_height: int | None = None,
+    limit: int = 200,
+) -> dict:
+    """
+    Find textures by name substring / format substring / minimum dimensions.
+    """
+    p: dict[str, object] = {"limit": limit}
+    if name is not None: p["name"] = name
+    if format is not None: p["format"] = format
+    if min_width is not None: p["min_width"] = min_width
+    if min_height is not None: p["min_height"] = min_height
+    return bridge.call("search_texture", p)
+
+
+@mcp.tool
+def search_buffer(
+    resource_id: str,
+    target_value: float | int | list,
+    data_type: Literal[
+        "float32", "float16", "int32", "uint32", "int16", "uint16",
+        "int8", "uint8", "int64", "uint64", "float64",
+    ] = "float32",
+    components: int = 1,
+    tolerance: float = 1e-4,
+    max_results: int = 20,
+    offset: int = 0,
+    length: int = 0,
+) -> dict:
+    """
+    Locate occurrences of a numeric value (or vector) inside a buffer.
+
+    Useful for verifying that a constant pushed into a structured buffer
+    actually arrived (e.g. find raymarch step count == 64).
+
+    Args:
+        resource_id: Buffer ResourceId.
+        target_value: Number, or list of N numbers when components > 1.
+        data_type: scalar element type.
+        components: 1..4 — search for groups of N consecutive scalars.
+        tolerance: float comparison tolerance.
+        max_results: cap match count.
+        offset / length: optional byte range to scan.
+    """
+    return bridge.call(
+        "search_buffer",
+        {
+            "resource_id": resource_id,
+            "target_value": target_value,
+            "data_type": data_type,
+            "components": components,
+            "tolerance": tolerance,
+            "max_results": max_results,
+            "offset": offset,
+            "length": length,
+        },
+    )
+
+
+@mcp.tool
+def list_disassembly_targets() -> dict:
+    """
+    Available disassembly targets supported by RenderDoc for the current capture
+    (e.g. 'DXBC', 'DXIL', 'SPIR-V', 'HLSL', 'GLSL'). Use this to discover
+    valid `target` values for `disassemble_shader` and `decompile_shader`.
+    """
+    return bridge.call("list_disassembly_targets", {})
+
+
+@mcp.tool
+def disassemble_shader(
+    event_id: int,
+    stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
+    target: str | None = None,
+) -> dict:
+    """
+    Get raw disassembly text for a shader stage with explicit target selection.
+
+    For HLSL/GLSL decompilation use `decompile_shader` instead. For default-target
+    disassembly + cbuffer values, use `get_shader_info`.
+    """
+    p: dict[str, object] = {"event_id": event_id, "stage": stage}
+    if target is not None: p["target"] = target
+    return bridge.call("disassemble_shader", p)
+
+
+@mcp.tool
+def decompile_shader(
+    event_id: int,
+    stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
+    language: Literal["hlsl", "glsl"] = "hlsl",
+) -> dict:
+    """
+    Attempt to decompile a shader to HLSL or GLSL by selecting a matching
+    disassembly target. Availability depends on the API and shader format
+    (DXBC/DXIL → HLSL; SPIR-V → GLSL or HLSL via spirv-cross).
+    """
+    return bridge.call(
+        "decompile_shader",
+        {"event_id": event_id, "stage": stage, "language": language},
+    )
+
+
+@mcp.tool
 def list_captures(directory: str) -> dict:
     """
     List all RenderDoc capture files (.rdc) in the specified directory.
@@ -511,7 +737,7 @@ def _extension_dir():
     return Path.home() / ".local" / "share" / "qrenderdoc" / "extensions"
 
 
-_BUNDLED_EXTENSION_VERSION = "1.1.0"
+_BUNDLED_EXTENSION_VERSION = "1.2.0"
 
 
 def _read_installed_extension_version(dest):

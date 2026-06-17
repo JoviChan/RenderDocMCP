@@ -353,6 +353,64 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["data"]
 
+    def list_disassembly_targets(self):
+        """Available disassembly targets (e.g. 'DXBC','HLSL','GLSL','SPIR-V')."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        out = {"targets": []}
+
+        def cb(controller):
+            try:
+                out["targets"] = [str(t) for t in controller.GetDisassemblyTargets(True)]
+            except Exception as e:
+                out["error"] = str(e)
+
+        self._invoke(cb)
+        return out
+
+    def disassemble_shader(self, event_id, stage, target=None):
+        """Get raw disassembly text. ``target`` selects DXBC/SPIR-V/etc."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        out = {"event_id": event_id, "stage": stage}
+
+        def cb(controller):
+            controller.SetFrameEvent(event_id, True)
+            pipe = controller.GetPipelineState()
+            stage_enum = Helpers.parse_stage_string(stage)
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                out["error"] = "No %s shader bound" % stage
+                return
+            reflection = pipe.GetShaderReflection(stage_enum)
+            try:
+                targets = list(controller.GetDisassemblyTargets(True))
+                chosen = targets[0]
+                if target:
+                    for t in targets:
+                        if str(t).lower() == target.lower():
+                            chosen = t
+                            break
+                pipe_obj = Helpers.get_pipeline_object(pipe)
+                out["target"] = str(chosen)
+                out["disassembly"] = controller.DisassembleShader(
+                    pipe_obj, reflection, chosen
+                )
+                out["available_targets"] = [str(t) for t in targets]
+            except Exception as e:
+                out["error"] = str(e)
+
+        self._invoke(cb)
+        return out
+
+    def decompile_shader(self, event_id, stage, language="hlsl"):
+        """Decompile to HLSL / GLSL by selecting matching disassembly target."""
+        out = self.disassemble_shader(event_id, stage, target=language)
+        out["language"] = language
+        if "disassembly" in out:
+            out["source"] = out.pop("disassembly")
+        return out
+
     # =================================================================
     # Internal: stage binding extractors (SRV/UAV/Sampler)
     # =================================================================

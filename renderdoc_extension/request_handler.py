@@ -35,6 +35,21 @@ class RequestHandler:
             "get_dispatches": self._handle_get_dispatches,
             "get_pass_drawcalls": self._handle_get_pass_drawcalls,
             "detect_engine": self._handle_detect_engine,
+            "analyze_rdc": self._handle_analyze_rdc,
+            "get_frame_hierarchy": self._handle_get_frame_hierarchy,
+            "search_actions": self._handle_search_actions,
+            "get_drawcall_summary": self._handle_get_drawcall_summary,
+            "get_drawcall_stats": self._handle_get_drawcall_stats,
+            "get_all_passes": self._handle_get_all_passes,
+            "get_buffer_operations": self._handle_get_buffer_operations,
+            "get_resource_overview": self._handle_get_resource_overview,
+            "get_texture_stats": self._handle_get_texture_stats,
+            "get_buffer_stats": self._handle_get_buffer_stats,
+            "search_texture": self._handle_search_texture,
+            "search_buffer": self._handle_search_buffer,
+            "list_disassembly_targets": self._handle_list_disassembly_targets,
+            "disassemble_shader": self._handle_disassemble_shader,
+            "decompile_shader": self._handle_decompile_shader,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
         }
@@ -258,6 +273,95 @@ class RequestHandler:
     def _handle_detect_engine(self, params):
         """Handle detect_engine request"""
         return self.facade.detect_engine()
+
+    def _handle_analyze_rdc(self, params):
+        return self.facade.analyze_rdc()
+
+    def _handle_get_frame_hierarchy(self, params):
+        return self.facade.get_frame_hierarchy(int(params.get("max_depth", 3)))
+
+    def _handle_search_actions(self, params):
+        return self.facade.search_actions(
+            name_pattern=params.get("name_pattern"),
+            marker_filter=params.get("marker_filter"),
+            event_id_min=params.get("event_id_min"),
+            event_id_max=params.get("event_id_max"),
+            flags=params.get("flags"),
+            limit=int(params.get("limit", 200)),
+        )
+
+    def _handle_get_drawcall_summary(self, params):
+        return self.facade.get_drawcall_summary(
+            event_id_min=params.get("event_id_min"),
+            event_id_max=params.get("event_id_max"),
+            marker_filter=params.get("marker_filter"),
+            limit=int(params.get("limit", 500)),
+        )
+
+    def _handle_get_drawcall_stats(self, params):
+        return self.facade.get_drawcall_stats()
+
+    def _handle_get_all_passes(self, params):
+        return self.facade.get_all_passes()
+
+    def _handle_get_buffer_operations(self, params):
+        return self.facade.get_buffer_operations(
+            event_id_min=params.get("event_id_min"),
+            event_id_max=params.get("event_id_max"),
+        )
+
+    def _handle_get_resource_overview(self, params):
+        return self.facade.get_resource_overview()
+
+    def _handle_get_texture_stats(self, params):
+        return self.facade.get_texture_stats(int(params.get("top_n", 10)))
+
+    def _handle_get_buffer_stats(self, params):
+        return self.facade.get_buffer_stats(int(params.get("top_n", 10)))
+
+    def _handle_search_texture(self, params):
+        return self.facade.search_texture(
+            name=params.get("name"),
+            format=params.get("format"),
+            min_width=params.get("min_width"),
+            min_height=params.get("min_height"),
+            limit=int(params.get("limit", 200)),
+        )
+
+    def _handle_search_buffer(self, params):
+        resource_id = params.get("resource_id")
+        target_value = params.get("target_value")
+        if resource_id is None or target_value is None:
+            raise ValueError("resource_id and target_value are required")
+        return self.facade.search_buffer(
+            resource_id=resource_id,
+            target_value=target_value,
+            data_type=params.get("data_type", "float32"),
+            components=int(params.get("components", 1)),
+            tolerance=float(params.get("tolerance", 1e-4)),
+            max_results=int(params.get("max_results", 20)),
+            offset=int(params.get("offset", 0)),
+            length=int(params.get("length", 0)),
+        )
+
+    def _handle_list_disassembly_targets(self, params):
+        return self.facade.list_disassembly_targets()
+
+    def _handle_disassemble_shader(self, params):
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None or stage is None:
+            raise ValueError("event_id and stage are required")
+        return self.facade.disassemble_shader(int(event_id), stage, params.get("target"))
+
+    def _handle_decompile_shader(self, params):
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None or stage is None:
+            raise ValueError("event_id and stage are required")
+        return self.facade.decompile_shader(
+            int(event_id), stage, params.get("language", "hlsl")
+        )
 
     def _handle_list_captures(self, params):
         """Handle list_captures request"""
