@@ -626,3 +626,97 @@ class ResourceService:
             raise ValueError(result["error"])
         return result
 
+    # =================================================================
+    # Export
+    # =================================================================
+
+    def export_texture(self, resource_id, output_path, mip=0, slice_idx=0, sample=0):
+        """Save a texture to disk (PNG/JPG/HDR/EXR/DDS — deduced from extension)."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        import os
+
+        result = {"path": None, "error": None}
+
+        def callback(controller):
+            try:
+                rid = Parsers.parse_resource_id(resource_id)
+                sub = rd.Subresource()
+                sub.mip = mip
+                sub.slice = slice_idx
+                sub.sample = sample
+
+                save = rd.TextureSave()
+                save.resourceId = rid
+                save.mip = mip
+                save.slice = rd.TextureSliceSave()
+                save.slice.sliceIndex = slice_idx
+                save.sample = rd.TextureSampleSave()
+                save.sample.sampleIndex = sample
+
+                ext = os.path.splitext(output_path)[1].lower()
+                if ext in (".hdr",):
+                    save.destType = rd.FileType.HDR
+                elif ext in (".exr",):
+                    save.destType = rd.FileType.EXR
+                elif ext in (".dds",):
+                    save.destType = rd.FileType.DDS
+                elif ext in (".jpg", ".jpeg"):
+                    save.destType = rd.FileType.JPG
+                elif ext in (".bmp",):
+                    save.destType = rd.FileType.BMP
+                elif ext in (".tga",):
+                    save.destType = rd.FileType.TGA
+                else:
+                    save.destType = rd.FileType.PNG
+
+                controller.SaveTexture(save, output_path)
+                result["path"] = os.path.abspath(output_path)
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return {"path": result["path"], "resource_id": resource_id}
+
+    def export_buffer(self, resource_id, output_path, offset=0, length=0):
+        """Save raw buffer data to a binary file."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        import os
+
+        result = {"path": None, "error": None}
+
+        def callback(controller):
+            try:
+                rid = Parsers.parse_resource_id(resource_id)
+                buf_desc = None
+                for buf in controller.GetBuffers():
+                    if buf.resourceId == rid:
+                        buf_desc = buf
+                        break
+                if not buf_desc:
+                    result["error"] = "Buffer not found: %s" % resource_id
+                    return
+
+                actual = length if length > 0 else buf_desc.length
+                data = controller.GetBufferData(rid, offset, actual)
+
+                os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+                with open(output_path, "wb") as f:
+                    f.write(data)
+
+                result["path"] = os.path.abspath(output_path)
+                result["bytes_written"] = len(data)
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result
+
+

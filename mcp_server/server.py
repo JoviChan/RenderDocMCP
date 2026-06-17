@@ -694,6 +694,152 @@ def decompile_shader(
 
 
 @mcp.tool
+def get_pixel_history(resource_id: str, x: int, y: int) -> dict:
+    """
+    Get the modification history of a single pixel across the entire frame.
+
+    Shows which draw calls wrote to (x,y) in the specified texture, including
+    pre/post color values, depth/stencil test results, and discard/cull info.
+    """
+    return bridge.call("get_pixel_history", {"resource_id": resource_id, "x": x, "y": y})
+
+
+@mcp.tool
+def debug_pixel_shader(event_id: int, x: int, y: int, sample: int = 0) -> dict:
+    """
+    Start a pixel shader debug session at screen coordinates (x,y).
+
+    Returns a session_id to use with `step_shader_debugger` and `get_shader_state`.
+    Call `free_shader_debugger` when done.
+    """
+    return bridge.call("debug_pixel_shader", {
+        "event_id": event_id, "x": x, "y": y, "sample": sample,
+    })
+
+
+@mcp.tool
+def step_shader_debugger(session_id: str, step_count: int = 1) -> dict:
+    """
+    Step the shader debugger forward. Returns changed variables after step.
+    """
+    return bridge.call("step_shader_debugger", {
+        "session_id": session_id, "step_count": step_count,
+    })
+
+
+@mcp.tool
+def get_shader_state(session_id: str) -> dict:
+    """
+    Get current variable state of a shader debug session.
+    """
+    return bridge.call("get_shader_state", {"session_id": session_id})
+
+
+@mcp.tool
+def free_shader_debugger(session_id: str) -> dict:
+    """
+    Free a shader debug session (release resources).
+    """
+    return bridge.call("free_shader_debugger", {"session_id": session_id})
+
+
+@mcp.tool
+def apply_shader_edit(
+    event_id: int,
+    stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
+    source_code: str,
+    language: Literal["hlsl", "glsl"] = "hlsl",
+) -> dict:
+    """
+    Compile custom shader source and apply it to a draw call. The edit
+    persists until `remove_shader_edit` is called. Useful for live shader
+    experiments within a capture.
+    """
+    return bridge.call("apply_shader_edit", {
+        "event_id": event_id, "stage": stage,
+        "source_code": source_code, "language": language,
+    })
+
+
+@mcp.tool
+def remove_shader_edit(
+    event_id: int,
+    stage: Literal["vertex", "hull", "domain", "geometry", "pixel", "compute"],
+) -> dict:
+    """
+    Remove a previously applied shader edit from a draw call.
+    """
+    return bridge.call("remove_shader_edit", {"event_id": event_id, "stage": stage})
+
+
+@mcp.tool
+def export_texture(
+    resource_id: str,
+    output_path: str,
+    mip: int = 0,
+    slice: int = 0,
+    sample: int = 0,
+) -> dict:
+    """
+    Save a texture to disk. Format is deduced from the file extension:
+    .png / .jpg / .bmp / .tga / .hdr / .exr / .dds.
+    """
+    return bridge.call("export_texture", {
+        "resource_id": resource_id, "output_path": output_path,
+        "mip": mip, "slice": slice, "sample": sample,
+    })
+
+
+@mcp.tool
+def export_buffer(
+    resource_id: str,
+    output_path: str,
+    offset: int = 0,
+    length: int = 0,
+) -> dict:
+    """
+    Save raw buffer data to a binary file.
+    """
+    return bridge.call("export_buffer", {
+        "resource_id": resource_id, "output_path": output_path,
+        "offset": offset, "length": length,
+    })
+
+
+@mcp.tool
+def generate_rdg_flowchart(format: Literal["mermaid", "dot"] = "mermaid") -> dict:
+    """
+    Build a Render Dependency Graph from pass → render target → SRV edges.
+
+    Returns a Mermaid or DOT graph string that can be visualized.
+    """
+    return bridge.call("generate_rdg_flowchart", {"format": format})
+
+
+@mcp.tool
+def find_overlay_issues() -> dict:
+    """
+    Heuristic issue scanner: detects high overdraw, unlit draws (no pixel
+    shader), potential full-screen quad draws, etc.
+    """
+    return bridge.call("find_overlay_issues", {})
+
+
+@mcp.tool
+def execute_python(code: str) -> dict:
+    """
+    Execute arbitrary Python code in the RenderDoc context.
+
+    The code has access to `rd` (renderdoc module), `controller`
+    (ReplayController), and `ctx` (CaptureContext). Set a variable
+    named `result` to surface it in the return value.
+
+    WARNING: Power-user escape hatch with no sandboxing.
+    """
+    return bridge.call("execute_python", {"code": code})
+
+
+@mcp.tool
 def list_captures(directory: str) -> dict:
     """
     List all RenderDoc capture files (.rdc) in the specified directory.
@@ -737,7 +883,7 @@ def _extension_dir():
     return Path.home() / ".local" / "share" / "qrenderdoc" / "extensions"
 
 
-_BUNDLED_EXTENSION_VERSION = "1.2.0"
+_BUNDLED_EXTENSION_VERSION = "1.3.0"
 
 
 def _read_installed_extension_version(dest):

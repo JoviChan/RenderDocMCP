@@ -50,6 +50,18 @@ class RequestHandler:
             "list_disassembly_targets": self._handle_list_disassembly_targets,
             "disassemble_shader": self._handle_disassemble_shader,
             "decompile_shader": self._handle_decompile_shader,
+            "get_pixel_history": self._handle_get_pixel_history,
+            "debug_pixel_shader": self._handle_debug_pixel_shader,
+            "step_shader_debugger": self._handle_step_shader_debugger,
+            "get_shader_state": self._handle_get_shader_state,
+            "free_shader_debugger": self._handle_free_shader_debugger,
+            "apply_shader_edit": self._handle_apply_shader_edit,
+            "remove_shader_edit": self._handle_remove_shader_edit,
+            "export_texture": self._handle_export_texture,
+            "export_buffer": self._handle_export_buffer,
+            "generate_rdg_flowchart": self._handle_generate_rdg_flowchart,
+            "find_overlay_issues": self._handle_find_overlay_issues,
+            "execute_python": self._handle_execute_python,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
         }
@@ -362,6 +374,96 @@ class RequestHandler:
         return self.facade.decompile_shader(
             int(event_id), stage, params.get("language", "hlsl")
         )
+
+    def _handle_get_pixel_history(self, params):
+        resource_id = params.get("resource_id")
+        x = params.get("x")
+        y = params.get("y")
+        if resource_id is None or x is None or y is None:
+            raise ValueError("resource_id, x, y are required")
+        return self.facade.get_pixel_history(resource_id, int(x), int(y))
+
+    def _handle_debug_pixel_shader(self, params):
+        event_id = params.get("event_id")
+        x = params.get("x")
+        y = params.get("y")
+        if event_id is None or x is None or y is None:
+            raise ValueError("event_id, x, y are required")
+        return self.facade.debug_pixel_shader(
+            int(event_id), int(x), int(y),
+            int(params.get("sample", 0)),
+            params.get("primitive"),
+        )
+
+    def _handle_step_shader_debugger(self, params):
+        session_id = params.get("session_id")
+        if session_id is None:
+            raise ValueError("session_id is required")
+        return self.facade.step_shader_debugger(session_id, int(params.get("step_count", 1)))
+
+    def _handle_get_shader_state(self, params):
+        session_id = params.get("session_id")
+        if session_id is None:
+            raise ValueError("session_id is required")
+        return self.facade.get_shader_state(session_id)
+
+    def _handle_free_shader_debugger(self, params):
+        session_id = params.get("session_id")
+        if session_id is None:
+            raise ValueError("session_id is required")
+        return self.facade.free_shader_debugger(session_id)
+
+    def _handle_apply_shader_edit(self, params):
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        source_code = params.get("source_code")
+        if event_id is None or stage is None or source_code is None:
+            raise ValueError("event_id, stage, source_code are required")
+        return self.facade.apply_shader_edit(
+            int(event_id), stage, source_code, params.get("language", "hlsl")
+        )
+
+    def _handle_remove_shader_edit(self, params):
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None or stage is None:
+            raise ValueError("event_id and stage are required")
+        return self.facade.remove_shader_edit(int(event_id), stage)
+
+    def _handle_export_texture(self, params):
+        resource_id = params.get("resource_id")
+        output_path = params.get("output_path")
+        if resource_id is None or output_path is None:
+            raise ValueError("resource_id and output_path are required")
+        return self.facade.export_texture(
+            resource_id, output_path,
+            int(params.get("mip", 0)),
+            int(params.get("slice", 0)),
+            int(params.get("sample", 0)),
+        )
+
+    def _handle_export_buffer(self, params):
+        resource_id = params.get("resource_id")
+        output_path = params.get("output_path")
+        if resource_id is None or output_path is None:
+            raise ValueError("resource_id and output_path are required")
+        return self.facade.export_buffer(
+            resource_id, output_path,
+            int(params.get("offset", 0)),
+            int(params.get("length", 0)),
+        )
+
+    def _handle_generate_rdg_flowchart(self, params):
+        return self.facade.generate_rdg_flowchart(params.get("format", "mermaid"))
+
+    def _handle_find_overlay_issues(self, params):
+        return self.facade.find_overlay_issues()
+
+    def _handle_execute_python(self, params):
+        code = params.get("code")
+        if code is None:
+            raise ValueError("code is required")
+        return self.facade.execute_python(code)
 
     def _handle_list_captures(self, params):
         """Handle list_captures request"""

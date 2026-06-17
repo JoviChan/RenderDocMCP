@@ -260,3 +260,50 @@ class RenderDocFacade:
     def decompile_shader(self, event_id, stage, language="hlsl"):
         """Decompile to HLSL/GLSL."""
         return self._pipeline.decompile_shader(event_id, stage, language)
+
+    # ==================== Pixel History ====================
+
+    def get_pixel_history(self, resource_id, x, y, sub_resource=None):
+        """Get pixel modification history."""
+        return self._pipeline.get_pixel_history(resource_id, x, y, sub_resource)
+
+    # ==================== Shader Debug ====================
+
+    def debug_pixel_shader(self, event_id, x, y, sample=0, primitive=None):
+        return self._pipeline.debug_pixel_shader(event_id, x, y, sample, primitive)
+
+    def step_shader_debugger(self, session_id, step_count=1):
+        return self._pipeline.step_shader_debugger(session_id, step_count)
+
+    def get_shader_state(self, session_id):
+        return self._pipeline.get_shader_state(session_id)
+
+    def free_shader_debugger(self, session_id):
+        return self._pipeline.free_shader_debugger(session_id)
+
+    # ==================== Shader Edit ====================
+
+    def apply_shader_edit(self, event_id, stage, source_code, language="hlsl"):
+        return self._pipeline.apply_shader_edit(event_id, stage, source_code, language)
+
+    def remove_shader_edit(self, event_id, stage):
+        return self._pipeline.remove_shader_edit(event_id, stage)
+
+    # ==================== Export ====================
+
+    def export_texture(self, resource_id, output_path, mip=0, slice_idx=0, sample=0):
+        return self._resource.export_texture(resource_id, output_path, mip, slice_idx, sample)
+
+    def export_buffer(self, resource_id, output_path, offset=0, length=0):
+        return self._resource.export_buffer(resource_id, output_path, offset, length)
+
+    # ==================== RDG / Issues / Exec ====================
+
+    def generate_rdg_flowchart(self, format="mermaid"):
+        return self._action.generate_rdg_flowchart(format)
+
+    def find_overlay_issues(self):
+        return self._action.find_overlay_issues()
+
+    def execute_python(self, code):
+        return self._action.execute_python(code)

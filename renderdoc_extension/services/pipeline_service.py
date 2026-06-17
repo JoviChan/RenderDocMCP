@@ -412,6 +412,310 @@ class PipelineService:
         return out
 
     # =================================================================
+    # Pixel History
+    # =================================================================
+
+    def get_pixel_history(self, resource_id, x, y, sub_resource=None):
+        """Get the modification history of a single pixel."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"pixel_history": None, "error": None}
+
+        def callback(controller):
+            try:
+                rid = Parsers.parse_resource_id(resource_id)
+
+                tex_desc = None
+                for tex in controller.GetTextures():
+                    if tex.resourceId == rid:
+                        tex_desc = tex
+                        break
+                if tex_desc is None:
+                    result["error"] = "Texture not found: %s" % resource_id
+                    return
+
+                sub = sub_resource if sub_resource is not None else rd.Subresource()
+                comp_type = rd.CompType.Float
+
+                history = controller.PixelHistory(rid, x, y, sub, comp_type)
+
+                entries = []
+                for h in history:
+                    entry = {
+                        "event_id": h.eventId,
+                        "passed": not h.Passed() if hasattr(h, "Passed") else None,
+                    }
+                    try:
+                        entry["primitive_id"] = h.primitiveID
+                    except Exception:
+                        pass
+
+                    def _pixel_val(pv):
+                        try:
+                            return [pv.floatValue[i] for i in range(4)]
+                        except Exception:
+                            try:
+                                return [pv.uintValue[i] for i in range(4)]
+                            except Exception:
+                                return None
+
+                    try:
+                        entry["pre_mod"] = _pixel_val(h.preMod)
+                        entry["post_mod"] = _pixel_val(h.postMod)
+                        entry["shader_out"] = _pixel_val(h.shaderOut)
+                    except Exception:
+                        pass
+
+                    try:
+                        entry["depth_failed"] = h.depthTestFailed
+                        entry["stencil_failed"] = h.stencilTestFailed
+                        entry["backface_culled"] = h.backfaceCulled
+                        entry["scissor_clipped"] = h.scissorClipped
+                        entry["shader_discarded"] = h.shaderDiscarded
+                    except Exception:
+                        pass
+
+                    entries.append(entry)
+
+                result["pixel_history"] = {
+                    "resource_id": resource_id,
+                    "x": x, "y": y,
+                    "texture_width": tex_desc.width,
+                    "texture_height": tex_desc.height,
+                    "format": str(tex_desc.format.Name()),
+                    "modifications": entries,
+                    "count": len(entries),
+                }
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["pixel_history"]
+
+    # =================================================================
+    # Shader Debug (stateful — traces stored per session)
+    # =================================================================
+
+    _debug_sessions = {}
+    _next_session_id = [1]
+
+    def debug_pixel_shader(self, event_id, x, y, sample=0, primitive=None):
+        """Start a pixel shader debug session at (x,y). Returns session_id."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"session": None, "error": None}
+
+        def callback(controller):
+            try:
+                controller.SetFrameEvent(event_id, True)
+
+                input_spec = rd.DebugPixelInputs()
+                input_spec.sample = sample
+                if primitive is not None:
+                    input_spec.primitive = primitive
+
+                trace = controller.DebugPixel(x, y, input_spec)
+                if trace is None:
+                    result["error"] = "Debug failed — no shader at (%d,%d)" % (x, y)
+                    return
+
+                sid = "dbg_%d" % PipelineService._next_session_id[0]
+                PipelineService._next_session_id[0] += 1
+                PipelineService._debug_sessions[sid] = {
+                    "trace": trace,
+                    "event_id": event_id,
+                    "x": x, "y": y,
+                }
+
+                result["session"] = {
+                    "session_id": sid,
+                    "event_id": event_id,
+                    "x": x, "y": y,
+                    "num_instructions": len(trace.instInfo) if hasattr(trace, "instInfo") else None,
+                }
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["session"]
+
+    def step_shader_debugger(self, session_id, step_count=1):
+        """Step the debug session forward. Returns variable state after step."""
+        if session_id not in PipelineService._debug_sessions:
+            raise ValueError("Unknown session: %s" % session_id)
+
+        result = {"state": None, "error": None}
+        session = PipelineService._debug_sessions[session_id]
+
+        def callback(controller):
+            try:
+                trace = session["trace"]
+                states = controller.ContinueDebug(trace)
+                if not states:
+                    result["state"] = {"finished": True}
+                    return
+
+                last = states[-1] if states else None
+                if last is None:
+                    result["state"] = {"finished": True}
+                    return
+
+                variables = []
+                for v in (last.changes if hasattr(last, "changes") else []):
+                    variables.append(Serializers.shader_var_to_dict(v))
+
+                result["state"] = {
+                    "session_id": session_id,
+                    "step_index": getattr(last, "stepIndex", None),
+                    "finished": bool(getattr(last, "flags", 0) & 1) if hasattr(last, "flags") else False,
+                    "changed_variables": variables,
+                }
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["state"]
+
+    def get_shader_state(self, session_id):
+        """Get current variable state of a debug session."""
+        if session_id not in PipelineService._debug_sessions:
+            raise ValueError("Unknown session: %s" % session_id)
+
+        result = {"state": None, "error": None}
+        session = PipelineService._debug_sessions[session_id]
+
+        def callback(controller):
+            try:
+                trace = session["trace"]
+                state = controller.GetDebugState(trace) if hasattr(controller, "GetDebugState") else None
+                if state is None:
+                    result["state"] = {"session_id": session_id, "variables": []}
+                    return
+
+                variables = []
+                for v in (getattr(state, "variables", []) or []):
+                    variables.append(Serializers.shader_var_to_dict(v))
+
+                result["state"] = {
+                    "session_id": session_id,
+                    "variables": variables,
+                }
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["state"]
+
+    def free_shader_debugger(self, session_id):
+        """Free a debug session."""
+        if session_id not in PipelineService._debug_sessions:
+            raise ValueError("Unknown session: %s" % session_id)
+
+        session = PipelineService._debug_sessions.pop(session_id)
+
+        def callback(controller):
+            try:
+                trace = session.get("trace")
+                if trace and hasattr(controller, "FreeTrace"):
+                    controller.FreeTrace(trace)
+            except Exception:
+                pass
+
+        self._invoke(callback)
+        return {"freed": True, "session_id": session_id}
+
+    # =================================================================
+    # Shader Edit
+    # =================================================================
+
+    _shader_edits = {}
+
+    def apply_shader_edit(self, event_id, stage, source_code, language="hlsl"):
+        """Build a custom shader from source and apply it to a draw call."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"applied": False, "error": None}
+
+        def callback(controller):
+            try:
+                controller.SetFrameEvent(event_id, True)
+                stage_enum = Helpers.parse_stage_string(stage)
+                pipe = controller.GetPipelineState()
+                orig_shader = pipe.GetShader(stage_enum)
+                reflection = pipe.GetShaderReflection(stage_enum)
+                entry = pipe.GetShaderEntryPoint(stage_enum)
+                pipe_obj = Helpers.get_pipeline_object(pipe)
+
+                enc = rd.ShaderEncoding.HLSL if language.lower() == "hlsl" else rd.ShaderEncoding.GLSL
+
+                built = controller.BuildCustomShader(
+                    entry, source_code, enc, rd.ShaderCompileFlags(), stage_enum
+                )
+
+                if built.resourceId == rd.ResourceId.Null():
+                    errors = getattr(built, "errors", "Unknown error")
+                    result["error"] = "Shader compile failed: %s" % str(errors)
+                    return
+
+                edits = controller.GetCustomShaderReplacements()
+                edits.append(rd.ShaderReplacement(orig_shader, built.resourceId))
+                controller.SetCustomShaderReplacements(edits)
+
+                key = "%d_%s" % (event_id, stage)
+                PipelineService._shader_edits[key] = {
+                    "original": orig_shader,
+                    "replacement": built.resourceId,
+                    "event_id": event_id,
+                    "stage": stage,
+                }
+
+                result["applied"] = True
+                result["edit_key"] = key
+                result["custom_shader_id"] = str(built.resourceId)
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+
+        self._invoke(callback)
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result
+
+    def remove_shader_edit(self, event_id, stage):
+        """Remove a previously applied shader edit."""
+        key = "%d_%s" % (event_id, stage)
+        edit = PipelineService._shader_edits.pop(key, None)
+        if edit is None:
+            raise ValueError("No active edit for event %d stage %s" % (event_id, stage))
+
+        def callback(controller):
+            try:
+                edits = controller.GetCustomShaderReplacements()
+                new_edits = [e for e in edits if e.original != edit["original"]]
+                controller.SetCustomShaderReplacements(new_edits)
+                controller.FreeCustomShader(edit["replacement"])
+            except Exception:
+                pass
+
+        self._invoke(callback)
+        return {"removed": True, "edit_key": key}
+
+    # =================================================================
     # Internal: stage binding extractors (SRV/UAV/Sampler)
     # =================================================================
 

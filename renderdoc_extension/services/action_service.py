@@ -907,4 +907,223 @@ class ActionService:
         self._invoke(callback)
         return result
 
+    # =================================================================
+    # RDG Flowchart
+    # =================================================================
 
+    def generate_rdg_flowchart(self, format="mermaid"):
+        """Build a Mermaid (or DOT) render dependency graph from pass/RT usage."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"graph": None}
+
+        def callback(controller):
+            structured = controller.GetStructuredFile()
+            edges = []
+            pass_nodes = []
+            rt_nodes = set()
+
+            # Walk top-level markers; for each that has draws, check render targets.
+            def visit(actions, marker_path):
+                for a in actions:
+                    is_push = a.flags & rd.ActionFlags.PushMarker
+                    if is_push:
+                        marker_path = marker_path + [a.GetName(structured)]
+                    if a.flags & rd.ActionFlags.Drawcall:
+                        pass_name = marker_path[-1] if marker_path else ("EID_%d" % a.eventId)
+                        try:
+                            controller.SetFrameEvent(a.eventId, False)
+                            pipe = controller.GetPipelineState()
+                            om = pipe.GetOutputMerger()
+                            if om:
+                                for rt in om.renderTargets:
+                                    if rt.resourceId != rd.ResourceId.Null():
+                                        rt_name = str(rt.resourceId)
+                                        edges.append((pass_name, rt_name))
+                                        rt_nodes.add(rt_name)
+                                if om.depthTarget.resourceId != rd.ResourceId.Null():
+                                    rt_name = str(om.depthTarget.resourceId) + "_depth"
+                                    edges.append((pass_name, rt_name))
+                                    rt_nodes.add(rt_name)
+                            # SRVs that reference known RTs create read→pass edges.
+                            for stage in Helpers.get_all_shader_stages():
+                                try:
+                                    srvs = pipe.GetReadOnlyResources(stage, False)
+                                    for srv in srvs:
+                                        srv_name = str(srv.descriptor.resource)
+                                        if srv_name in rt_nodes:
+                                            edges.append((srv_name, pass_name))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        if pass_name not in pass_nodes:
+                            pass_nodes.append(pass_name)
+
+                    if a.children:
+                        visit(a.children, marker_path)
+                    if is_push:
+                        marker_path = marker_path[:-1]
+
+            visit(controller.GetRootActions(), [])
+
+            # Deduplicate edges.
+            edge_set = set()
+            unique_edges = []
+            for src, dst in edges:
+                key = (src, dst)
+                if key not in edge_set:
+                    edge_set.add(key)
+                    unique_edges.append(key)
+
+            def safe_id(name):
+                import re
+                return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+            if format.lower() == "dot":
+                lines = ["digraph RDG {", '  rankdir=LR;']
+                for p in pass_nodes:
+                    lines.append('  %s [shape=box, label="%s"];' % (safe_id(p), p))
+                for rt in rt_nodes:
+                    lines.append('  %s [shape=ellipse, label="%s"];' % (safe_id(rt), rt))
+                for src, dst in unique_edges:
+                    lines.append("  %s -> %s;" % (safe_id(src), safe_id(dst)))
+                lines.append("}")
+                result["graph"] = "\n".join(lines)
+            else:
+                lines = ["graph LR"]
+                for src, dst in unique_edges:
+                    lines.append("  %s --> %s" % (safe_id(src), safe_id(dst)))
+                result["graph"] = "\n".join(lines)
+
+            result["format"] = format
+            result["pass_count"] = len(pass_nodes)
+            result["rt_count"] = len(rt_nodes)
+            result["edge_count"] = len(unique_edges)
+
+        self._invoke(callback)
+        return result
+
+    def find_overlay_issues(self):
+        """Heuristic issue detection: overdraw, unlit draws, large fullscreen quads, etc."""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"issues": []}
+
+        def callback(controller):
+            structured = controller.GetStructuredFile()
+            issues = []
+            rt_draw_count = {}
+            fullscreen_draws = []
+
+            def visit(actions):
+                for a in actions:
+                    if a.flags & rd.ActionFlags.Drawcall:
+                        try:
+                            controller.SetFrameEvent(a.eventId, False)
+                            pipe = controller.GetPipelineState()
+                            om = pipe.GetOutputMerger()
+
+                            # Track overdraw: how many draws target each RT.
+                            if om:
+                                for rt in om.renderTargets:
+                                    if rt.resourceId != rd.ResourceId.Null():
+                                        k = str(rt.resourceId)
+                                        rt_draw_count[k] = rt_draw_count.get(k, 0) + 1
+
+                            # Detect potentially expensive full-screen quads.
+                            if a.numIndices in (3, 4, 6) and a.numInstances == 1:
+                                fullscreen_draws.append({
+                                    "event_id": a.eventId,
+                                    "name": a.GetName(structured),
+                                    "num_indices": a.numIndices,
+                                })
+
+                            # Detect no pixel shader bound.
+                            ps = pipe.GetShader(rd.ShaderStage.Pixel)
+                            if ps == rd.ResourceId.Null():
+                                issues.append({
+                                    "type": "no_pixel_shader",
+                                    "severity": "warning",
+                                    "event_id": a.eventId,
+                                    "name": a.GetName(structured),
+                                    "message": "Draw has no pixel shader bound",
+                                })
+
+                        except Exception:
+                            pass
+
+                    if a.children:
+                        visit(a.children)
+
+            visit(controller.GetRootActions())
+
+            # Overdraw: flag RTs with > 50 draws.
+            for rt_id, count in rt_draw_count.items():
+                if count > 50:
+                    issues.append({
+                        "type": "high_overdraw",
+                        "severity": "info",
+                        "resource_id": rt_id,
+                        "draw_count": count,
+                        "message": "Render target has %d draws (potential overdraw)" % count,
+                    })
+
+            if fullscreen_draws:
+                issues.append({
+                    "type": "fullscreen_quads",
+                    "severity": "info",
+                    "count": len(fullscreen_draws),
+                    "draws": fullscreen_draws[:10],
+                    "message": "%d possible full-screen triangle/quad draws" % len(fullscreen_draws),
+                })
+
+            result["issues"] = issues
+            result["count"] = len(issues)
+
+        self._invoke(callback)
+        return result
+
+    def execute_python(self, code):
+        """Execute arbitrary Python code in the RenderDoc context.
+
+        Returns stdout + the value of the last expression (if any).
+        WARNING: This is a power-user escape hatch with no sandboxing.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"output": None, "error": None}
+
+        def callback(controller):
+            import io
+            import sys
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            cap_out = io.StringIO()
+            cap_err = io.StringIO()
+            sys.stdout = cap_out
+            sys.stderr = cap_err
+            try:
+                local_ns = {
+                    "rd": rd,
+                    "controller": controller,
+                    "ctx": self.ctx,
+                }
+                exec(code, local_ns)
+                result["output"] = cap_out.getvalue()
+                result["stderr"] = cap_err.getvalue()
+                result["return_value"] = local_ns.get("result", None)
+            except Exception as e:
+                import traceback
+                result["error"] = str(e)
+                result["traceback"] = traceback.format_exc()
+                result["output"] = cap_out.getvalue()
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
+        self._invoke(callback)
+        return result
