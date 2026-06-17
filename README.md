@@ -9,7 +9,7 @@
 - 🔍 **支持递归展开** struct / array / 矩阵嵌套；按路径精确钻取
 - 📊 一次拉取某个 draw 在某个 stage 的所有绑定（SRV / UAV / Sampler / CBuffer + 值）
 - 📦 资源目录（textures / buffers）+ 类型化 buffer 读取（无需 base64 解码）
-- ⚡ **傻瓜式安装** — `uvx --from git+https://github.com/halby24/RenderDocMCP.git`，扩展端首次启动自动安装/升级
+- ⚡ **傻瓜式安装** — `uvx --from git+https://github.com/JoviChan/RenderDocMCP.git`，扩展端首次启动自动安装/升级
 
 ## 一键安装
 
@@ -20,7 +20,11 @@
   "mcpServers": {
     "renderdoc": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/halby24/RenderDocMCP.git", "renderdoc-mcp"]
+      "args": [
+        "--refresh-package", "renderdoc-mcp",
+        "--from", "git+https://github.com/JoviChan/RenderDocMCP.git",
+        "renderdoc-mcp"
+      ]
     }
   }
 }
